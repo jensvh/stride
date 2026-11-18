@@ -22,8 +22,8 @@ jobs:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
@@ -31,11 +31,11 @@ jobs:
       - run: npm run build -w lens
       # Pages must be switched on once per repository with "GitHub Actions" as
       # the source (Settings → Pages); the built-in token cannot do that itself.
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/configure-pages@v6
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: lens/dist
           # .well-known holds the manifest the glasses read for the app icon.
           include-hidden-files: true
       - id: deploy
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
