@@ -143,8 +143,8 @@ final class Probe: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         if !speechAllowed { log("speech: permission denied. Allow it in Settings → Stride Probe.") }
 
         do {
-            // playAndRecord + allowBluetooth is what makes iOS offer the glasses' microphone.
-            try session.setCategory(.playAndRecord, mode: .default, options: [.allowBluetooth, .defaultToSpeaker])
+            // playAndRecord + the hands-free profile is what makes iOS offer the glasses' microphone.
+            try session.setCategory(.playAndRecord, mode: .default, options: [.allowBluetoothHFP, .defaultToSpeaker])
             try session.setActive(true)
         } catch {
             log("audio session: could not start (\(describe(error)))")
@@ -650,7 +650,7 @@ final class Probe: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         let input = session.currentRoute.inputs.first
         if !running {
             list.append(Finding(id: "Glasses microphone", answer: "Connect the glasses, then press Start.", verdict: .unknown))
-        } else if let input, input.portType == .bluetoothHFP {
+        } else if let input, input.portType == .bluetoothHFP || input.portType == .bluetoothLE {
             let hears = peak > 0.01
             list.append(Finding(
                 id: "Glasses microphone",
