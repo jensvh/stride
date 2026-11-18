@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+bridge/config.json
+bridge/.state/
+bridge/logs/
+*.ipa
+*.log
+.DS_Store
+ios/*.xcodeproj
+ios/build/

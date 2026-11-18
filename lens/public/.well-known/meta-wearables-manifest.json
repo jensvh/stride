@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "name": "Stride",
+  "description": "Talk to Claude Code on your own PC while you walk.",
+  "appearance": {
+    "theme_color": "#E8963A",
+    "icon": {
+      "src": "../icon.png",
+      "type": "monochrome"
+    }
+  }
+}

@@ -1,0 +1,223 @@
+[
+  {
+    "name": "idle",
+    "state": { "rev": 1, "project": "api", "projects": ["api", "web"], "phase": "idle", "phone": false, "lensCanPrompt": true }
+  },
+  {
+    "name": "idle-phone",
+    "state": { "rev": 2, "project": "api", "projects": ["api", "web"], "phase": "idle", "phone": true, "lensCanPrompt": false }
+  },
+  {
+    "name": "listening",
+    "state": {
+      "rev": 3, "project": "api", "projects": ["api", "web"], "phase": "listening", "phone": true, "lensCanPrompt": false,
+      "transcript": "fix the failing importer test and then run the whole"
+    }
+  },
+  {
+    "name": "working",
+    "state": {
+      "rev": 4, "project": "api", "projects": ["api", "web"], "phase": "working", "phone": true, "lensCanPrompt": false,
+      "transcript": "Fix the failing importer test and run the whole suite.",
+      "activity": "Edit importer.ts", "startedAt": 0
+    }
+  },
+  {
+    "name": "working-live",
+    "state": {
+      "rev": 5, "project": "api", "projects": ["api", "web"], "phase": "working", "phone": true, "lensCanPrompt": false,
+      "transcript": "Migrate the settings page to the new form library.",
+      "activity": "Run npm test", "startedAt": 0,
+      "live": {
+        "title": "Migration",
+        "visual": {
+          "type": "checklist",
+          "items": [
+            { "text": "Replace form wrapper", "done": true },
+            { "text": "Port validation rules", "done": true },
+            { "text": "Update tests", "done": false },
+            { "text": "Remove old dependency", "done": false }
+          ]
+        }
+      }
+    }
+  },
+  {
+    "name": "approve",
+    "state": {
+      "rev": 6, "project": "api", "projects": ["api", "web"], "phase": "asking", "phone": true, "lensCanPrompt": false,
+      "transcript": "Add zod and validate the config.",
+      "ask": {
+        "id": "a1", "kind": "approve",
+        "title": "Run: npm install zod",
+        "detail": "Add the validation library",
+        "expiresAt": 0
+      }
+    }
+  },
+  {
+    "name": "approve-long",
+    "state": {
+      "rev": 7, "project": "api", "projects": ["api", "web"], "phase": "asking", "phone": false, "lensCanPrompt": true,
+      "ask": {
+        "id": "a2", "kind": "approve",
+        "title": "Run: git checkout -b add-discount && git add -A && git status --short && git commit -q -m \"Add discount helper with range check\"",
+        "detail": "Create branch and commit all changes",
+        "expiresAt": 0
+      }
+    }
+  },
+  {
+    "name": "choice",
+    "state": {
+      "rev": 8, "project": "api", "projects": ["api", "web"], "phase": "asking", "phone": true, "lensCanPrompt": false,
+      "ask": {
+        "id": "a3", "kind": "choice",
+        "title": "Which database should the cache use?",
+        "options": [
+          { "label": "Postgres", "description": "Already in the stack" },
+          { "label": "SQLite", "description": "One file, no server" },
+          { "label": "Keep the JSON file" }
+        ],
+        "expiresAt": 0
+      }
+    }
+  },
+  {
+    "name": "result",
+    "state": {
+      "rev": 9, "project": "api", "projects": ["api", "web"], "phase": "idle", "phone": true, "lensCanPrompt": false,
+      "card": {
+        "id": "c1", "kind": "result", "project": "api", "at": 0,
+        "title": "Fixed, both tests pass",
+        "lines": [
+          "The VAT function now multiplies the net price by one plus the rate.",
+          "I ran the tests and both pass.",
+          "The change is in price.js and isn't committed yet."
+        ],
+        "stats": { "files": 2, "added": 13, "removed": 1, "durationS": 30, "tools": 5 }
+      }
+    }
+  },
+  {
+    "name": "result-long",
+    "state": {
+      "rev": 10, "project": "web", "projects": ["api", "web"], "phase": "idle", "phone": false, "lensCanPrompt": true,
+      "card": {
+        "id": "c2", "kind": "result", "project": "web", "at": 0,
+        "title": "Settings page migrated",
+        "lines": [
+          "All six forms now use the new library and the old wrapper is gone.",
+          "Validation messages moved into one shared file.",
+          "Two snapshot tests needed updating because the markup changed.",
+          "I left the date picker alone since it has its own open issue.",
+          "Everything is on the branch settings-forms, ready for review.",
+          "The notes for the reviewer are in the pull request description."
+        ],
+        "stats": { "files": 14, "added": 212, "removed": 348, "durationS": 372, "tools": 41 }
+      }
+    }
+  },
+  {
+    "name": "result-bars",
+    "state": {
+      "rev": 11, "project": "api", "projects": ["api", "web"], "phase": "idle", "phone": true, "lensCanPrompt": false,
+      "card": {
+        "id": "c3", "kind": "result", "project": "api", "at": 0,
+        "title": "Import is the slow part",
+        "lines": ["Parsing takes most of the request time."],
+        "visual": {
+          "type": "bars", "unit": "ms",
+          "items": [
+            { "label": "parse", "value": 840 },
+            { "label": "validate", "value": 210 },
+            { "label": "write", "value": 95 },
+            { "label": "respond", "value": 12 }
+          ]
+        },
+        "stats": { "durationS": 48, "tools": 9 }
+      }
+    }
+  },
+  {
+    "name": "result-table",
+    "state": {
+      "rev": 12, "project": "api", "projects": ["api", "web"], "phase": "idle", "phone": true, "lensCanPrompt": false,
+      "card": {
+        "id": "c4", "kind": "result", "project": "api", "at": 0,
+        "title": "Three open pull requests",
+        "lines": [],
+        "visual": {
+          "type": "table",
+          "head": ["PR", "Checks", "Age"],
+          "rows": [
+            ["Retry backoff", "passing", "2 d"],
+            ["Importer fix", "failing", "5 h"],
+            ["Bump deps", "passing", "9 d"]
+          ]
+        },
+        "stats": { "durationS": 11, "tools": 2 }
+      }
+    }
+  },
+  {
+    "name": "result-code",
+    "state": {
+      "rev": 13, "project": "api", "projects": ["api", "web"], "phase": "idle", "phone": true, "lensCanPrompt": false,
+      "card": {
+        "id": "c5", "kind": "result", "project": "api", "at": 0,
+        "title": "This is the new signature",
+        "lines": [],
+        "visual": {
+          "type": "code", "lang": "ts",
+          "text": "export function retry<T>(\n  fn: () => Promise<T>,\n  opts: { tries: number; baseMs: number },\n): Promise<T>"
+        },
+        "stats": { "files": 1, "added": 18, "removed": 4, "durationS": 64, "tools": 6 }
+      }
+    }
+  },
+  {
+    "name": "result-checklist",
+    "state": {
+      "rev": 14, "project": "web", "projects": ["api", "web"], "phase": "idle", "phone": true, "lensCanPrompt": false,
+      "card": {
+        "id": "c6", "kind": "result", "project": "web", "at": 0,
+        "title": "Three of four steps done",
+        "lines": ["The old dependency is still used by the admin page."],
+        "visual": {
+          "type": "checklist",
+          "items": [
+            { "text": "Replace form wrapper", "done": true },
+            { "text": "Port validation rules", "done": true },
+            { "text": "Update tests", "done": true },
+            { "text": "Remove old dependency", "done": false }
+          ]
+        },
+        "stats": { "files": 9, "added": 140, "removed": 96, "durationS": 201, "tools": 23 }
+      }
+    }
+  },
+  {
+    "name": "error",
+    "state": {
+      "rev": 15, "project": "api", "projects": ["api", "web"], "phase": "idle", "phone": true, "lensCanPrompt": false,
+      "card": {
+        "id": "c7", "kind": "error", "project": "api", "at": 0,
+        "title": "Claude login expired",
+        "lines": ["Sign in again on the PC."]
+      }
+    }
+  },
+  {
+    "name": "stopped",
+    "state": {
+      "rev": 16, "project": "api", "projects": ["api", "web"], "phase": "idle", "phone": false, "lensCanPrompt": true,
+      "note": "Added to the running task",
+      "card": {
+        "id": "c8", "kind": "info", "project": "api", "at": 0,
+        "title": "Stopped",
+        "lines": ["2 files were changed before the stop. Say \"undo that\" to revert."]
+      }
+    }
+  }
+]

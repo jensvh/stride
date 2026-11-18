@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="mrbd-web-app-capable" content="yes" />
+    <meta name="robots" content="noindex" />
+    <title>Stride probe</title>
+    <style>
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; background: #000; color: #fff; font: 20px/1.3 system-ui, Roboto, sans-serif; overflow: hidden; }
+      main { width: 600px; height: 600px; padding: 26px 32px; display: flex; flex-direction: column; gap: 12px; margin: auto; }
+      h1 { margin: 0; font-size: 18px; letter-spacing: .08em; text-transform: uppercase; color: #ffb86b; }
+      #checks { flex: 1; min-height: 0; overflow: auto; display: grid; grid-template-columns: 1fr max-content; gap: 3px 14px; align-content: start; font-size: 17px; }
+      #checks span:nth-child(odd) { color: rgba(255,255,255,.66); }
+      .ok { color: #8fe3a6; } .bad { color: #ff8f85; } .wait { color: rgba(255,255,255,.4); }
+      .row { display: flex; gap: 10px; }
+      button, input { font: 600 20px system-ui, Roboto, sans-serif; color: #fff; background: transparent; border: 2px solid rgba(255,255,255,.22); border-radius: 999px; padding: 9px 20px; outline: none; flex: 1; min-width: 0; }
+      button:focus, input:focus { border-color: #ffb86b; color: #ffb86b; background: rgba(255,184,107,.16); }
+      #last { margin: 0; font: 16px ui-monospace, Menlo, Consolas, monospace; color: rgba(255,255,255,.5); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Stride probe</h1>
+      <div id="checks"></div>
+      <div class="row">
+        <button id="speak">Speak</button>
+        <input id="field" type="text" placeholder="Dictate here" enterkeyhint="send" />
+      </div>
+      <p id="last">waiting for input</p>
+    </main>
+    <script>
+      // One self-contained page that finds out what the glasses' browser allows,
+      // shows it on the lens and reports every result to the PC over the relay.
+      const KEY = 'stride.probe.v1';
+      const checks = document.getElementById('checks');
+      const last = document.getElementById('last');
+      const rows = new Map();
+      const outbox = [];
+      let ws, open = false, ackId = 0;
+
+      function report(msg) {
+        const line = `probe: ${msg}`;
+        if (open) ws.send(JSON.stringify({ type: 'sendToGroup', group: 'up', dataType: 'json', noEcho: true, data: { v: 1, t: 'log', level: 'info', msg: line } }));
+        else outbox.push(line);
+      }
+      function set(name, value, cls) {
+        let cell = rows.get(name);
+        if (!cell) {
+          const label = document.createElement('span');
+          label.textContent = name;
+          cell = document.createElement('span');
+          checks.append(label, cell);
+          rows.set(name, cell);
+        }
+        if (cell.textContent === String(value)) return;
+        cell.textContent = value;
+        cell.className = cls || '';
+        report(`${name} = ${value}`);
+      }
+      const note = (text) => { last.textContent = text; report(text); };
+
+      // 1. Did the query string of the install link survive?
+      const params = new URLSearchParams(location.search);
+      const fromLink = params.get('r');
+      set('query in link', fromLink ? `yes (${fromLink.length} chars)` : 'no', fromLink ? 'ok' : 'bad');
+      set('fragment in link', location.hash ? 'yes' : 'no');
+
+      // 2. Does local storage persist between launches?
+      let store = {};
+      try {
+        store = JSON.parse(localStorage.getItem(KEY) || '{}');
+        store.launches = (store.launches || 0) + 1;
+        if (fromLink) store.r = fromLink;
+        localStorage.setItem(KEY, JSON.stringify(store));
+        set('storage', `works, launch #${store.launches}`, store.launches > 1 ? 'ok' : 'wait');
+      } catch (err) {
+        set('storage', `blocked: ${err.name}`, 'bad');
+      }
+
+      // 3. Screen and browser.
+      set('viewport', `${innerWidth}x${innerHeight} @${devicePixelRatio}`);
+      set('browser', (navigator.userAgent.match(/Chrom\w+\/[\d.]+/) || ['?'])[0]);
+      set('online', String(navigator.onLine));
+
+      // 4. Can the page open a WebSocket to the relay, and does it survive sleep?
+      const token = fromLink || store.r;
+      let relayUrl;
+      try { relayUrl = token ? atob(token.replace(/-/g, '+').replace(/_/g, '/')) : undefined; } catch { relayUrl = undefined; }
+      let connects = 0, pongs = 0, pingN = 0, lastPong = 0;
+      function connect() {
+        if (!relayUrl) return set('relay socket', 'no token', 'bad');
+        set('relay socket', 'connecting', 'wait');
+        const t0 = performance.now();
+        try { ws = new WebSocket(relayUrl, 'json.webpubsub.azure.v1'); }
+        catch (err) { return set('relay socket', `refused: ${err.name}`, 'bad'); }
+        ws.onopen = () => {
+          ws.send(JSON.stringify({ type: 'joinGroup', group: 'down', ackId: ++ackId }));
+        };
+        ws.onmessage = (ev) => {
+          let f; try { f = JSON.parse(ev.data); } catch { return; }
+          if (f.type === 'ack' && !open) {
+            if (!f.success) return set('relay socket', `join refused: ${f.error && f.error.name}`, 'bad');
+            open = true; connects++;
+            set('relay socket', `open in ${Math.round(performance.now() - t0)} ms (x${connects})`, 'ok');
+            ws.send(JSON.stringify({ type: 'sendToGroup', group: 'up', dataType: 'json', noEcho: true, data: { v: 1, t: 'hello', device: 'lens', app: 'probe' } }));
+            while (outbox.length) report(outbox.shift().replace(/^probe: /, ''));
+            ping();
+          }
+          if (f.type === 'message' && f.data && f.data.t === 'pong') {
+            pongs++; lastPong = Date.now();
+            set('PC answers', `yes, ${Date.now() - f.data.n} ms round trip`, 'ok');
+          }
+        };
+        ws.onclose = (ev) => {
+          const was = open; open = false;
+          set('relay socket', `closed (${ev.code})${was ? '' : ' before opening'}`, 'bad');
+          setTimeout(connect, 3000);
+        };
+      }
+      function ping() {
+        if (open) ws.send(JSON.stringify({ type: 'sendToGroup', group: 'up', dataType: 'json', noEcho: true, data: { v: 1, t: 'ping', n: Date.now() } }));
+      }
+      connect();
+      setInterval(ping, 10000);
+
+      // 5. What happens while the display sleeps or the app is left?
+      let ticks = 0, lastTick = Date.now(), longestGap = 0, hiddenAt = 0;
+      setInterval(() => {
+        const now = Date.now();
+        longestGap = Math.max(longestGap, now - lastTick);
+        lastTick = now; ticks++;
+        set('longest timer gap', `${(longestGap / 1000).toFixed(1)} s`, longestGap > 5000 ? 'bad' : 'ok');
+      }, 1000);
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') { hiddenAt = Date.now(); report('visibility hidden'); }
+        else {
+          const away = hiddenAt ? Math.round((Date.now() - hiddenAt) / 1000) : 0;
+          set('came back after', `${away} s, socket ${open ? 'still open' : 'closed'}, last pong ${lastPong ? Math.round((Date.now() - lastPong) / 1000) + ' s ago' : 'never'}`);
+        }
+      });
+      window.addEventListener('pagehide', () => report('pagehide'));
+      window.addEventListener('pageshow', (ev) => report(`pageshow persisted=${ev.persisted}`));
+      window.addEventListener('focus', () => report('window focus'));
+      window.addEventListener('blur', () => report('window blur'));
+
+      // 6. Neural Band and touchpad: which key events arrive?
+      const keys = [];
+      document.addEventListener('keydown', (ev) => {
+        keys.push(ev.key);
+        set('keys seen', [...new Set(keys)].join(' '), 'ok');
+        note(`keydown ${ev.key} (target ${ev.target.tagName.toLowerCase()})`);
+      });
+      for (const type of ['pointerdown', 'click', 'wheel', 'touchstart']) {
+        document.addEventListener(type, (ev) => note(`${type} on ${ev.target.tagName.toLowerCase()}`), { passive: true });
+      }
+
+      // 7. Dictation through the system composer.
+      const field = document.getElementById('field');
+      for (const type of ['focus', 'input', 'change', 'blur', 'compositionend']) {
+        field.addEventListener(type, () => {
+          if (type === 'change' || type === 'input') set('dictation', `${type}: "${field.value.slice(0, 40)}"`, 'ok');
+          else note(`field ${type}`);
+        });
+      }
+
+      // 8. Speech output and other capabilities.
+      const voices = () => (window.speechSynthesis ? speechSynthesis.getVoices() : []);
+      set('speech voices', window.speechSynthesis ? String(voices().length) : 'no API', window.speechSynthesis ? 'wait' : 'bad');
+      if (window.speechSynthesis) speechSynthesis.onvoiceschanged = () => set('speech voices', voices().map((v) => v.lang).slice(0, 4).join(' ') || '0', 'ok');
+      document.getElementById('speak').addEventListener('click', () => {
+        try {
+          const u = new SpeechSynthesisUtterance('Stride probe speaking. One, two, three.');
+          u.onstart = () => set('speech', 'started', 'ok');
+          u.onend = () => set('speech', 'finished', 'ok');
+          u.onerror = (ev) => set('speech', `error: ${ev.error}`, 'bad');
+          speechSynthesis.speak(u);
+        } catch (err) { set('speech', `threw: ${err.name}`, 'bad'); }
+      });
+      set('microphone API', navigator.mediaDevices && navigator.mediaDevices.getUserMedia ? 'present' : 'absent');
+      set('speech recognition', window.SpeechRecognition || window.webkitSpeechRecognition ? 'present' : 'absent');
+      set('wake lock', 'wakeLock' in navigator ? 'present' : 'absent');
+      set('notifications', 'Notification' in window ? Notification.permission : 'absent');
+
+      document.getElementById('speak').focus();
+      window.addEventListener('error', (ev) => report(`error: ${ev.message}`));
+    </script>
+  </body>
+</html>

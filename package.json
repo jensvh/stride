@@ -1,0 +1,15 @@
+{
+  "name": "stride",
+  "private": true,
+  "type": "module",
+  "workspaces": ["bridge", "lens"],
+  "scripts": {
+    "bridge": "npm run start -w bridge",
+    "say": "npm run say -w bridge --",
+    "pair": "npm run pair -w bridge",
+    "lens": "npm run dev -w lens",
+    "test": "npm run test -w bridge && npm run test -w lens",
+    "typecheck": "npm run typecheck -w bridge && npm run typecheck -w lens"
+  },
+  "engines": { "node": ">=24" }
+}
