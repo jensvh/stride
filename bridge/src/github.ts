@@ -54,6 +54,7 @@ export class GitHub {
   private readonly remote: (fullName: string) => string;
   private readonly log: (msg: string) => void;
   private cache: { at: number; repos: Repo[] } | undefined;
+  private loading: Promise<Repo[]> | undefined;
 
   constructor(opts: GitHubOptions) {
     this.accounts = opts.accounts;
@@ -141,48 +142,79 @@ export class GitHub {
     return { lines, ok };
   }
 
-  /** Every repository the configured accounts may use, newest activity first. Cached for 10 minutes. */
+  /**
+   * Every repository the configured accounts may use, newest activity first.
+   * GitHub takes seconds to list them, so a list older than 10 minutes is
+   * still answered at once and refreshed in the background: asking for a
+   * repository on a walk never waits for it. `force` waits for a fresh list.
+   */
   async repos(force = false): Promise<Repo[]> {
-    if (!force && this.cache && Date.now() - this.cache.at < CACHE_MS) return this.cache.repos;
-    const byName = new Map<string, Repo>();
-    const errors: string[] = [];
-    for (const account of this.accounts) {
-      if (!this.tokenOf(account)) continue;
-      try {
-        for (let page = 1; page <= 10; page++) {
-          const res = await this.request(
-            account,
-            `/user/repos?affiliation=owner,collaborator,organization_member&sort=pushed&per_page=100&page=${page}`,
-          );
-          if (!res.ok) throw new Error(`GitHub answered ${res.status}`);
-          const list = (await res.json()) as ApiRepo[];
-          for (const x of list) {
-            const repo: Repo = {
-              fullName: x.full_name,
-              owner: x.owner.login,
-              name: x.name,
-              private: x.private,
-              defaultBranch: x.default_branch,
-              canPush: x.permissions?.push === true,
-              account,
-              ...(x.description ? { description: x.description } : {}),
-              ...(x.pushed_at ? { pushedAt: x.pushed_at } : {}),
-            };
-            const key = repo.fullName.toLowerCase();
-            const prev = byName.get(key);
-            if (!prev || (!prev.canPush && repo.canPush)) byName.set(key, repo);
-          }
-          if (list.length < 100) break;
-        }
-      } catch (err) {
-        errors.push(`${account}: ${err instanceof Error ? err.message : String(err)}`);
+    if (!force && this.cache) {
+      if (Date.now() - this.cache.at >= CACHE_MS) {
+        this.load().catch((err: unknown) => this.log(`github: ${err instanceof Error ? err.message : String(err)}`));
       }
+      return this.cache.repos;
+    }
+    return this.load();
+  }
+
+  /** One listing at a time; callers that arrive meanwhile share it. */
+  private load(): Promise<Repo[]> {
+    this.loading ??= this.listAll().finally(() => {
+      this.loading = undefined;
+    });
+    return this.loading;
+  }
+
+  private async listAll(): Promise<Repo[]> {
+    const errors: string[] = [];
+    // All accounts at once; merged in the configured order so the result does not depend on timing.
+    const lists = await Promise.all(
+      this.accounts.map(async (account) => {
+        if (!this.tokenOf(account)) return [];
+        try {
+          return await this.listFor(account);
+        } catch (err) {
+          errors.push(`${account}: ${err instanceof Error ? err.message : String(err)}`);
+          return [];
+        }
+      }),
+    );
+    const byName = new Map<string, Repo>();
+    for (const repo of lists.flat()) {
+      const key = repo.fullName.toLowerCase();
+      const prev = byName.get(key);
+      if (!prev || (!prev.canPush && repo.canPush)) byName.set(key, repo);
     }
     if (byName.size === 0 && errors.length) throw new Error(`Could not list repositories (${errors.join('; ')})`);
     for (const e of errors) this.log(`github: ${e}`);
     const repos = [...byName.values()].sort((a, b) => (b.pushedAt ?? '').localeCompare(a.pushedAt ?? ''));
     this.cache = { at: Date.now(), repos };
     return repos;
+  }
+
+  private async listFor(account: string): Promise<Repo[]> {
+    const out: Repo[] = [];
+    for (let page = 1; page <= 10; page++) {
+      const res = await this.request(account, `/user/repos?affiliation=owner,collaborator,organization_member&sort=pushed&per_page=100&page=${page}`);
+      if (!res.ok) throw new Error(`GitHub answered ${res.status}`);
+      const list = (await res.json()) as ApiRepo[];
+      for (const x of list) {
+        out.push({
+          fullName: x.full_name,
+          owner: x.owner.login,
+          name: x.name,
+          private: x.private,
+          defaultBranch: x.default_branch,
+          canPush: x.permissions?.push === true,
+          account,
+          ...(x.description ? { description: x.description } : {}),
+          ...(x.pushed_at ? { pushedAt: x.pushed_at } : {}),
+        });
+      }
+      if (list.length < 100) break;
+    }
+    return out;
   }
 
   private readonly identities = new Map<string, { name: string; email: string }>();

@@ -135,6 +135,6 @@ The Meta AI app needs Developer Mode (Settings → App Info → tap the version 
 ## Tests
 
 ```powershell
-npm test          # 114 tests: routing, approvals, undo, relay permissions, repo matching, the work-folder guard, clone and publish against local stand-ins for GitHub
+npm test          # 116 tests: routing, approvals, undo, relay permissions, repo matching, the work-folder guard, clone and publish against local stand-ins for GitHub
 npm run typecheck
 ```

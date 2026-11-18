@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { GitHub, matchRepos, tokenVar, type Repo } from '../src/github.ts';
 
 const repo = (fullName: string, over: Partial<Repo> = {}): Repo => {
@@ -85,6 +85,37 @@ describe('GitHub', () => {
     expect(list).toHaveLength(102);
     // Reachable from both accounts: the one with push access wins.
     expect(list.find((r) => r.fullName === 'shared/x')).toMatchObject({ canPush: true, account: 'b' });
+  });
+
+  it('answers from an old list at once and refreshes it in the background', async () => {
+    let names = ['me/old'];
+    let calls = 0;
+    let now = 1_000_000;
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const gh = new GitHub({
+      accounts: ['me'],
+      token: () => 'tok',
+      fetch: (async () => {
+        calls++;
+        return Response.json(names.map((full_name) => api({ full_name })));
+      }) as unknown as typeof fetch,
+    });
+    try {
+      // Callers that arrive while GitHub is still answering share one listing.
+      const [a, b] = await Promise.all([gh.repos(), gh.repos()]);
+      expect([a.length, b.length, calls]).toEqual([1, 1, 1]);
+      names = ['me/old', 'me/new'];
+      now += 5 * 60_000;
+      expect(await gh.repos()).toHaveLength(1); // recent: from memory
+      expect(calls).toBe(1);
+      now += 10 * 60_000;
+      expect(await gh.repos()).toHaveLength(1); // old: still answered at once...
+      expect(calls).toBe(2); // ...while a refresh runs
+      expect(await gh.repos(true)).toHaveLength(2); // joins that refresh instead of starting another
+      expect(calls).toBe(2);
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it('reports missing and mismatched tokens at startup', async () => {

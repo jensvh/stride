@@ -11,8 +11,12 @@ import { clientUrl, devKey } from './tokens.ts';
 loadEnv();
 const cfg = loadConfig();
 
-const stamp = () => new Date().toISOString().slice(11, 19);
-const day = () => new Date().toISOString().slice(0, 10);
+// Local time, like the work folder names: logs are read in your own time zone.
+const pad = (n: number) => String(n).padStart(2, '0');
+const stamp = (d = new Date()) => `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+const day = (d = new Date()) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+// Azure counts the daily message quota in UTC.
+const utcDay = () => new Date().toISOString().slice(0, 10);
 const append = (file: string, line: string) => {
   try {
     appendFileSync(join(LOG_DIR, file), `${line}\n`);
@@ -29,11 +33,11 @@ if (cfg.relay === 'dev') startDevRelay(cfg.devRelayPort, devKey(), log);
 
 // Azure's free tier allows 20,000 messages a day; say so before it runs out.
 const FREE_DAILY = 20_000;
-let quotaDay = day();
+let quotaDay = utcDay();
 let quotaUsed = 0;
 const meter = () => {
-  if (day() !== quotaDay) {
-    quotaDay = day();
+  if (utcDay() !== quotaDay) {
+    quotaDay = utcDay();
     quotaUsed = 0;
   }
   quotaUsed++;
@@ -70,8 +74,14 @@ bridge = new Bridge({
 log(`stride bridge: work folders in ${cfg.workRoot}, GitHub ${cfg.github.accounts.join(' + ')}, relay "${cfg.relay}", lens prompting ${cfg.lensCanPrompt ? 'on' : 'off'}`);
 relay.start();
 
-// Say at startup, not on the walk, when a GitHub token is missing or wrong.
+// Say at startup, not on the walk, when a GitHub token is missing or wrong,
+// and load the repository list now so the first "get the X repo" is instant.
 void bridge.github.check().then(({ lines }) => lines.forEach((l) => log(l)));
+const listed = Date.now();
+bridge.github.repos(true).then(
+  (repos) => log(`github: ${repos.length} repositories available (listed in ${((Date.now() - listed) / 1000).toFixed(1)} s)`),
+  (err: unknown) => log(`github: ${err instanceof Error ? err.message : String(err)}`),
+);
 log(`work folder ${bridge.workspaces.current().path}`);
 bridge.workspaces.cleanup();
 setInterval(() => bridge?.workspaces.cleanup(), 6 * 3_600_000);
