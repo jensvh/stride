@@ -20,6 +20,7 @@ Proof of concept. Built for one developer and one PC.
 | `lens/` | Web app that runs on the glasses. Renders the state, sends pinches and dictated prompts. |
 | `protocol/` | The wire format (`schema.ts`), the relay client both sides use, and the fixtures the tests and the lens demo share. |
 | `infra/` | Script that creates the Azure relay. |
+| `spikes/ios-audio-probe/` | Throwaway iPhone app that tests the glasses' microphone, on-device speech recognition, temple taps and locked-phone behaviour. Has its own README with the install steps. |
 | `ios/` | iPhone voice engine (not written yet). |
 
 ## Status
@@ -30,7 +31,8 @@ Proof of concept. Built for one developer and one PC.
 | M0.5 Probe on the glasses, Azure relay | Ready to run; needs the glasses |
 | M1 Dictate on the lens → Claude → answer on the glasses | Code done, tested in a desktop browser |
 | M2 Lens cards, approve by pinch, graphics | Code done, tested in a desktop browser |
-| M3–M5 iPhone voice engine, hands-free walk mode | Not started |
+| M3 iPhone build pipeline and audio probe | Builds on GitHub; the probe waits for its test on the phone |
+| M4–M5 iPhone voice engine, hands-free walk mode | Not started |
 
 ## Try it on the PC (no glasses, no Azure)
 
