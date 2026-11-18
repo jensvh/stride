@@ -11,3 +11,9 @@ bridge/logs/
 .DS_Store
 ios/*.xcodeproj
 ios/build/
+
+# iOS: generated on the build machine from project.yml
+*.xcodeproj/
+spikes/ios-audio-probe/Info.plist
+spikes/ios-audio-probe/build/
+Payload/

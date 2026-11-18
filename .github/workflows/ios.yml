@@ -1,0 +1,52 @@
+name: iPhone build
+
+# There is no Mac in this project. This workflow is the compiler: it turns the
+# Swift sources into an unsigned .ipa, which is then signed and installed from
+# Windows with a free Apple ID (see spikes/ios-audio-probe/README.md).
+
+on:
+  push:
+    paths: ['spikes/ios-audio-probe/**', '.github/workflows/ios.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    name: Audio probe
+    runs-on: macos-26
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: spikes/ios-audio-probe
+    steps:
+      - uses: actions/checkout@v7
+      - name: Select Xcode (pinned, so a runner update cannot change the build)
+        run: sudo xcode-select -s /Applications/Xcode_26.6.app && xcodebuild -version
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate the Xcode project
+        run: xcodegen generate
+      - name: Build without signing
+        run: |
+          xcodebuild build -quiet \
+            -project StrideProbe.xcodeproj -scheme StrideProbe \
+            -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
+      - name: Package the .ipa
+        run: |
+          mkdir Payload
+          cp -R build/Build/Products/Release-iphoneos/StrideProbe.app Payload/
+          zip -qry StrideProbe.ipa Payload
+          ls -l StrideProbe.ipa
+      - uses: actions/upload-artifact@v7
+        with:
+          name: StrideProbe
+          path: spikes/ios-audio-probe/StrideProbe.ipa
+          if-no-files-found: error

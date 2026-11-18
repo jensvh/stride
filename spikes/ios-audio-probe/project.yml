@@ -1,0 +1,49 @@
+# XcodeGen recipe. There is no Mac in this project: GitHub Actions generates the
+# Xcode project from this file and builds it (.github/workflows/ios.yml).
+name: StrideProbe
+options:
+  deploymentTarget:
+    iOS: "17.0"
+settings:
+  base:
+    # Swift 5 language mode: this code is written without a local compiler, so
+    # the strict concurrency checks of Swift 6 would only add build round trips.
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  StrideProbe:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+    scheme: {}
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: Stride Probe
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        # Keeps the microphone and the relay alive while the phone is locked.
+        UIBackgroundModes:
+          - audio
+        NSMicrophoneUsageDescription: Stride listens through your glasses so you can talk to Claude.
+        NSSpeechRecognitionUsageDescription: Stride turns what you say into text on this iPhone.
+        ITSAppUsesNonExemptEncryption: false
+        # The log file shows up in the Files app under "On My iPhone".
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        CFBundleURLTypes:
+          - CFBundleURLName: stride
+            CFBundleURLSchemes:
+              - stride
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.jensvh.stride.probe
+        TARGETED_DEVICE_FAMILY: "1"
+        GENERATE_INFOPLIST_FILE: NO
+        # The app is signed later, on Windows, with a free Apple ID.
+        CODE_SIGNING_ALLOWED: NO
