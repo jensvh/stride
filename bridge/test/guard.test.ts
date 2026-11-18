@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -27,8 +27,8 @@ describe('file tools', () => {
   it('sees through Windows short names for files that do not exist yet', () => {
     if (process.platform !== 'win32') return;
     // C:\Users\RUNNER~1\... and C:\Users\runneradmin\... are the same folder.
-    const short = execFileSync('cmd', ['/d', '/s', '/c', `for %I in ("${ws}") do @echo %~sI`], { windowsHide: true, windowsVerbatimArguments: true })
-      .toString()
+    const short = spawnSync('cmd', ['/d', '/s', '/c', `for %I in ("${ws}") do @echo %~sI`], { windowsHide: true, windowsVerbatimArguments: true })
+      .stdout.toString()
       .trim();
     expect(checkTool('Write', { file_path: join(short, 'api', 'new.ts') }, ws)).toBeUndefined();
     expect(checkTool('Write', { file_path: join(ws, 'api', 'new', 'deep.ts') }, short)).toBeUndefined();
