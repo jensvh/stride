@@ -12,19 +12,53 @@ loadEnv();
 const cfg = loadConfig();
 
 const b64url = (s: string) => Buffer.from(s, 'utf8').toString('base64url');
-const lensBase = cfg.lensUrl ?? (cfg.relay === 'dev' ? 'http://localhost:5173/' : undefined);
-if (!lensBase) {
-  console.error('Set "lensUrl" in bridge/config.json to where the lens web app is hosted (for example your GitHub Pages address).');
-  process.exit(1);
-}
-
-const lensToken = b64url(await clientUrl(cfg, 'lens'));
-const base = lensBase.endsWith('/') ? lensBase : `${lensBase}/`;
-const lensLink = `${base}?r=${lensToken}`;
-const probeLink = `${base}probe/index.html?r=${lensToken}`;
+const slash = (url: string) => (url.endsWith('/') ? url : `${url}/`);
+const qr = (text: string) => QRCode.toString(text, { type: 'svg', errorCorrectionLevel: 'L', margin: 2 });
 // The Meta AI app only keeps the query string when the whole app URL is encoded.
 const install = (name: string, url: string) =>
   `fb-viewapp://web_app_deep_link?appName=${encodeURIComponent(name)}&appUrl=${encodeURIComponent(url)}`;
+const style = `
+  body { font: 16px/1.5 system-ui, sans-serif; background: #111; color: #eee; margin: 0; padding: 40px; }
+  main { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 40px; max-width: 980px; margin: auto; }
+  section { background: #1b1b1b; border-radius: 16px; padding: 28px; }
+  h1 { font-size: 20px; margin: 0 0 6px; } p { margin: 0 0 16px; color: #aaa; }
+  svg { width: 100%; height: auto; background: #fff; border-radius: 12px; }
+  footer { max-width: 980px; margin: 28px auto 0; color: #888; font-size: 14px; }`;
+const needLensUrl = () => {
+  console.error('Set "lensUrl" in bridge/config.json to where the lens web app is hosted (for example your GitHub Pages address).');
+  process.exit(1);
+};
+
+// `npm run pair -- --probe`: the very first check, before a relay exists. The
+// code holds no token, only the public address of the probe page.
+if (process.argv.includes('--probe')) {
+  if (!cfg.lensUrl) needLensUrl();
+  const link = `${slash(cfg.lensUrl!)}probe/index.html?check=1`;
+  const file = join(STATE_DIR, 'probe.html');
+  writeFileSync(file, `<!doctype html>
+<meta charset="utf-8">
+<title>Stride probe</title>
+<style>${style}
+  main { max-width: 420px; display: block; }</style>
+<main>
+  <section>
+    <h1>Can the glasses run web apps?</h1>
+    <p>Scan with the iPhone camera. The Meta AI app opens and adds “Stride probe” (Developer Mode must be on). Open it on the glasses: a list of checks appears on the lens. “relay socket: no token” is expected at this stage.</p>
+    ${await qr(install('Stride probe', link))}
+  </section>
+</main>
+`);
+  console.log(`\nProbe page written. Open it on this PC and scan the code:\n\n  ${pathToFileURL(file).href}\n\nIt installs ${link}\n`);
+  process.exit(0);
+}
+
+const lensBase = cfg.relay === 'dev' ? 'http://localhost:5173/' : cfg.lensUrl;
+if (!lensBase) needLensUrl();
+
+const lensToken = b64url(await clientUrl(cfg, 'lens'));
+const base = slash(lensBase!);
+const lensLink = `${base}?r=${lensToken}`;
+const probeLink = `${base}probe/index.html?r=${lensToken}`;
 const lensInstall = install('Stride', lensLink);
 const probeInstall = install('Stride probe', probeLink);
 const phoneLink = `stride://pair?r=${b64url(await clientUrl(cfg, 'phone'))}`;
@@ -38,17 +72,10 @@ if (cfg.relay === 'dev') {
   process.exit(0);
 }
 
-const qr = (text: string) => QRCode.toString(text, { type: 'svg', errorCorrectionLevel: 'L', margin: 2 });
 const page = `<!doctype html>
 <meta charset="utf-8">
 <title>Stride pairing</title>
-<style>
-  body { font: 16px/1.5 system-ui, sans-serif; background: #111; color: #eee; margin: 0; padding: 40px; }
-  main { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 40px; max-width: 980px; margin: auto; }
-  section { background: #1b1b1b; border-radius: 16px; padding: 28px; }
-  h1 { font-size: 20px; margin: 0 0 6px; } p { margin: 0 0 16px; color: #aaa; }
-  svg { width: 100%; height: auto; background: #fff; border-radius: 12px; }
-  footer { max-width: 980px; margin: 28px auto 0; color: #888; font-size: 14px; }
+<style>${style}
 </style>
 <main>
   <section>

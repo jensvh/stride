@@ -89,6 +89,8 @@ Treat the pairing codes like a password. `npm run pair` again to renew them; reg
 
 ## Going live on the glasses
 
+First find out whether your glasses run web apps at all: set `"lensUrl"` in `bridge/config.json` to the Pages address and run `npm run pair -- --probe`. It writes a page with one QR code that installs the probe; no relay is needed for this check.
+
 1. Create the relay: `./infra/webpubsub.ps1 -SubscriptionId <id>` shows the plan, `-Apply` creates it and writes `bridge/.env`.
 2. Host the lens: pushing to `main` deploys `lens/` to GitHub Pages. In a fork, first set Settings → Pages → Source to "GitHub Actions".
 3. In `bridge/config.json` set `"relay": "azure"` and `"lensUrl"` to the Pages address. Restart the bridge.
