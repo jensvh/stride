@@ -7,7 +7,7 @@
 // runs (a test script, a build) still runs with the user's Windows rights.
 import { realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { relative, resolve } from 'node:path';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
 
 const WIN = process.platform === 'win32';
@@ -21,11 +21,23 @@ function native(p: string): string {
   return p.replace(/^~(?=$|[\\/])/, homedir());
 }
 
+/**
+ * The real location of a path: links and Windows short names (RUNNER~1)
+ * resolved. For a file that does not exist yet, its nearest existing parent is
+ * resolved and the rest appended, so both sides of a comparison match.
+ */
 function real(p: string): string {
-  try {
-    return realpathSync.native(p);
-  } catch {
-    return p; // does not exist yet: judge the path as written
+  const rest: string[] = [];
+  let cur = p;
+  for (;;) {
+    try {
+      return join(realpathSync.native(cur), ...rest.reverse());
+    } catch {
+      const parent = dirname(cur);
+      if (parent === cur) return p;
+      rest.push(basename(cur));
+      cur = parent;
+    }
   }
 }
 
