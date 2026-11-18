@@ -1,4 +1,5 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { CanUseTool } from '@anthropic-ai/claude-agent-sdk';
@@ -6,7 +7,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Down, State, Up } from '../../protocol/schema.ts';
 import { Bridge, type SessionLike } from '../src/bridge.ts';
 import type { Config } from '../src/config.ts';
-import type { SessionEvents } from '../src/session.ts';
+import { GitHub } from '../src/github.ts';
+import type { SessionEvents, SessionSetup } from '../src/session.ts';
+import { Workspaces } from '../src/workspace.ts';
 
 // A scripted stand-in for the Claude session.
 class FakeSession implements SessionLike {
@@ -48,15 +51,15 @@ class FakeSession implements SessionLike {
 let dir: string;
 let out: Down[];
 let sessions: Map<string, FakeSession>;
+let setups: SessionSetup[];
 let bridge: Bridge;
 
 const cfg = (over: Partial<Config> = {}): Config => ({
   relay: 'dev',
   devRelayPort: 0,
-  projects: [
-    { name: 'api', aliases: ['backend'], path: dir, allow: [] },
-    { name: 'web', aliases: [], path: dir, allow: [] },
-  ],
+  workRoot: join(dir, 'work'),
+  keepDays: 7,
+  github: { accounts: ['tester'] },
   lensCanPrompt: true,
   askTimeoutSeconds: 60,
   maxTurns: 10,
@@ -68,18 +71,24 @@ const cfg = (over: Partial<Config> = {}): Config => ({
 const make = (over: Partial<Config> = {}) => {
   out = [];
   sessions = new Map();
+  setups = [];
+  const c = cfg(over);
   bridge = new Bridge({
-    cfg: cfg(over),
+    cfg: c,
     send: (m) => out.push(m),
     log: () => {},
-    sessionsFile: join(dir, 'sessions.json'),
-    makeSession: (project, can, events, resumeId) => {
+    workspaces: new Workspaces({ root: c.workRoot, keepDays: c.keepDays, stateFile: join(dir, 'workspace.json') }),
+    github: new GitHub({ accounts: ['tester'], token: () => undefined }),
+    makeSession: (setup, can, events, resumeId) => {
       const s = new FakeSession(can, events, resumeId);
-      sessions.set(project.name, s);
+      sessions.set('main', s);
+      setups.push(setup);
       return s;
     },
   });
 };
+
+const gitIn = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, windowsHide: true }).toString();
 
 const up = (m: Up, from = 'phone') => bridge.onUp(m, from);
 const say = (text: string, from = 'phone') => up({ v: 1, t: 'prompt', id: 'p', text }, from);
@@ -104,36 +113,36 @@ afterEach(() => {
 describe('a task from start to finish', () => {
   it('goes idle → working → idle with a card and speech', async () => {
     say('Add a health endpoint');
-    await vi.waitFor(() => expect(sessions.get('api')?.sent).toEqual(['Add a health endpoint']));
+    await vi.waitFor(() => expect(sessions.get('main')?.sent).toEqual(['Add a health endpoint']));
     expect(state().phase).toBe('working');
     expect(state().transcript).toBe('Add a health endpoint');
 
-    sessions.get('api')!.events.onActivity('Edit server.ts');
+    sessions.get('main')!.events.onActivity('Edit server.ts');
     expect(state().activity).toBe('Edit server.ts');
 
-    sessions.get('api')!.finish('Health endpoint added\nIt returns 200 with the build version.');
+    sessions.get('main')!.finish('Health endpoint added\nIt returns 200 with the build version.');
     await vi.waitFor(() => expect(state().phase).toBe('idle'));
-    expect(state().card).toMatchObject({ kind: 'result', title: 'Health endpoint added', project: 'api' });
+    expect(state().card).toMatchObject({ kind: 'result', title: 'Health endpoint added', project: 'no repo yet' });
     expect(state().activity).toBeUndefined();
     expect(spoken().at(-1)).toBe('Health endpoint added. It returns 200 with the build version.');
   });
 
   it('attaches the graphic Claude showed to the result card', async () => {
     say('Run the tests');
-    await vi.waitFor(() => expect(sessions.get('api')?.sent.length).toBe(1));
+    await vi.waitFor(() => expect(sessions.get('main')?.sent.length).toBe(1));
     const visual = { type: 'bars' as const, items: [{ label: 'passed', value: 41 }, { label: 'failed', value: 1 }] };
-    sessions.get('api')!.events.onShow('Tests', visual);
+    sessions.get('main')!.events.onShow('Tests', visual);
     expect(state().live).toEqual({ title: 'Tests', visual });
-    sessions.get('api')!.finish('One test fails');
+    sessions.get('main')!.finish('One test fails');
     await vi.waitFor(() => expect(state().card?.visual).toEqual(visual));
     expect(state().live).toBeUndefined();
   });
 
   it('feeds words spoken mid-task into the running conversation', async () => {
     say('Refactor the importer');
-    await vi.waitFor(() => expect(sessions.get('api')?.sent.length).toBe(1));
+    await vi.waitFor(() => expect(sessions.get('main')?.sent.length).toBe(1));
     say('and keep the old function name');
-    await vi.waitFor(() => expect(sessions.get('api')?.sent.length).toBe(2));
+    await vi.waitFor(() => expect(sessions.get('main')?.sent.length).toBe(2));
     expect(state().phase).toBe('working');
   });
 });
@@ -141,8 +150,8 @@ describe('a task from start to finish', () => {
 describe('approvals', () => {
   const pendingAsk = async () => {
     say('Install zod');
-    await vi.waitFor(() => expect(sessions.get('api')?.sent.length).toBe(1));
-    const decision = sessions.get('api')!.ask('Bash', { command: 'npm install zod' });
+    await vi.waitFor(() => expect(sessions.get('main')?.sent.length).toBe(1));
+    const decision = sessions.get('main')!.ask('Bash', { command: 'npm install zod' });
     await vi.waitFor(() => expect(state().phase).toBe('asking'));
     return { decision };
   };
@@ -212,9 +221,9 @@ describe('approvals', () => {
 
   it('turns a clarifying question from Claude into a choice', async () => {
     say('Pick a database');
-    await vi.waitFor(() => expect(sessions.get('api')).toBeDefined());
+    await vi.waitFor(() => expect(sessions.get('main')).toBeDefined());
     const input = { questions: [{ question: 'Which database?', options: [{ label: 'Postgres' }, { label: 'SQLite' }] }] };
-    const decision = sessions.get('api')!.ask('AskUserQuestion', input);
+    const decision = sessions.get('main')!.ask('AskUserQuestion', input);
     await vi.waitFor(() => expect(state().ask?.kind).toBe('choice'));
     expect(spoken().at(-1)).toBe('Which database? 1: Postgres. 2: SQLite.');
     say('two');
@@ -239,17 +248,17 @@ describe('who may do what', () => {
     await settle();
     expect(sessions.size).toBe(0);
     say('do something', 'phone');
-    await vi.waitFor(() => expect(sessions.get('api')?.sent).toEqual(['do something']));
+    await vi.waitFor(() => expect(sessions.get('main')?.sent).toEqual(['do something']));
   });
 });
 
 describe('commands', () => {
   it('stop interrupts and shows Stopped instead of an error', async () => {
     say('Do a long thing');
-    await vi.waitFor(() => expect(sessions.get('api')?.busy).toBe(true));
+    await vi.waitFor(() => expect(sessions.get('main')?.busy).toBe(true));
     say('stop');
     await vi.waitFor(() => expect(state().card?.title).toBe('Stopped'));
-    expect(sessions.get('api')!.interrupted).toBe(1);
+    expect(sessions.get('main')!.interrupted).toBe(1);
     expect(state().phase).toBe('idle');
     expect(spoken()).toContain('Stopped.');
   });
@@ -262,52 +271,78 @@ describe('commands', () => {
 
   it('status and repeat answer by voice only', async () => {
     say('status');
-    await vi.waitFor(() => expect(spoken().at(-1)).toBe('api is idle.'));
+    await vi.waitFor(() => expect(spoken().at(-1)).toBe('Idle, no repo yet.'));
     say('Explain the build');
-    await vi.waitFor(() => expect(sessions.get('api')?.sent).toEqual(['Explain the build']));
-    sessions.get('api')!.finish('It uses Vite');
+    await vi.waitFor(() => expect(sessions.get('main')?.sent).toEqual(['Explain the build']));
+    sessions.get('main')!.finish('It uses Vite');
     await vi.waitFor(() => expect(state().phase).toBe('idle'));
     say('repeat');
     await vi.waitFor(() => expect(spoken().at(-1)).toBe('It uses Vite'));
-    expect(sessions.get('api')!.sent).toEqual(['Explain the build']);
+    expect(sessions.get('main')!.sent).toEqual(['Explain the build']);
   });
 
-  it('switches project and keeps each project\'s own card', async () => {
-    say('Explain the build');
-    await vi.waitFor(() => expect(sessions.get('api')?.sent.length).toBe(1));
-    sessions.get('api')!.finish('It uses Vite');
-    await vi.waitFor(() => expect(state().card?.title).toBe('It uses Vite'));
-
+  it('switches between repos of this session, and leaves other names to Claude', async () => {
+    const ws = bridge.workspaces.current().path;
+    for (const n of ['api', 'web']) mkdirSync(join(ws, n, '.git'), { recursive: true });
     say('switch to web');
     await vi.waitFor(() => expect(state().project).toBe('web'));
-    expect(state().card).toBeUndefined();
-    say('switch to the backend');
+    say('switch to the api');
     await vi.waitFor(() => expect(state().project).toBe('api'));
-    expect(state().card?.title).toBe('It uses Vite');
+    say('switch to billing');
+    await vi.waitFor(() => expect(sessions.get('main')?.sent.at(-1)).toMatch(/"api" folder[\s\S]*switch to billing$/));
   });
 
-  it('new session forgets the conversation', async () => {
+  it('new session forgets the conversation and starts in an empty folder', async () => {
     say('Hello');
-    await vi.waitFor(() => expect(sessions.get('api')?.sent.length).toBe(1));
-    const first = sessions.get('api')!;
+    await vi.waitFor(() => expect(sessions.get('main')?.sent.length).toBe(1));
+    const first = sessions.get('main')!;
+    const firstFolder = setups[0]!.cwd;
     first.events.onSessionId('abc');
     first.finish('Hi');
     await vi.waitFor(() => expect(state().phase).toBe('idle'));
     say('new session');
     await vi.waitFor(() => expect(first.disposed).toEqual([true]));
+    expect(spoken().at(-1)).toMatch(/empty work folder/);
     say('Hello again');
-    await vi.waitFor(() => expect(sessions.get('api')).not.toBe(first));
-    expect(sessions.get('api')!.resumeId).toBeUndefined();
+    await vi.waitFor(() => expect(sessions.get('main')).not.toBe(first));
+    expect(sessions.get('main')!.resumeId).toBeUndefined();
+    expect(setups[1]!.cwd).not.toBe(firstFolder);
+    expect(setups[1]!.cwd.startsWith(join(dir, 'work'))).toBe(true);
   });
+
+  it('undo puts back the files of every repo the last task changed', async () => {
+    const ws = bridge.workspaces.current().path;
+    for (const n of ['api', 'web']) {
+      const r = join(ws, n);
+      mkdirSync(r, { recursive: true });
+      gitIn(r, 'init', '-q');
+      writeFileSync(join(r, 'a.txt'), 'one\n');
+      gitIn(r, 'add', '-A');
+      gitIn(r, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'init');
+    }
+    // Git on Windows is slow to start: give the checkpoints time.
+    const slow = { timeout: 15_000 };
+    say('Change both');
+    await vi.waitFor(() => expect(sessions.get('main')?.sent.length).toBe(1), slow);
+    writeFileSync(join(ws, 'api', 'a.txt'), 'two\n');
+    writeFileSync(join(ws, 'web', 'b.txt'), 'new\n');
+    sessions.get('main')!.finish('Changed both');
+    await vi.waitFor(() => expect(state().card?.stats?.files).toBe(2), slow);
+    say('undo that');
+    await vi.waitFor(() => expect(spoken().at(-1)).toBe('Undone. 2 files restored.'), slow);
+    // Git for Windows may restore with CRLF line endings.
+    expect(readFileSync(join(ws, 'api', 'a.txt'), 'utf8').replace(/\r\n/g, '\n')).toBe('one\n');
+    expect(() => readFileSync(join(ws, 'web', 'b.txt'))).toThrow();
+  }, 60_000);
 
   it('resumes the saved conversation after a bridge restart', async () => {
     say('Hello');
-    await vi.waitFor(() => expect(sessions.get('api')).toBeDefined());
-    sessions.get('api')!.events.onSessionId('abc');
+    await vi.waitFor(() => expect(sessions.get('main')).toBeDefined());
+    sessions.get('main')!.events.onSessionId('abc');
     bridge.shutdown();
     make();
     say('Still there?');
-    await vi.waitFor(() => expect(sessions.get('api')?.resumeId).toBe('abc'));
+    await vi.waitFor(() => expect(sessions.get('main')?.resumeId).toBe('abc'));
   });
 });
 
@@ -315,7 +350,7 @@ describe('presence and sync', () => {
   it('sends the whole state when a device says hello', () => {
     out = [];
     up({ v: 1, t: 'hello', device: 'lens' }, 'lens');
-    expect(out.at(-1)).toMatchObject({ t: 'state', state: { phase: 'idle', project: 'api' } });
+    expect(out.at(-1)).toMatchObject({ t: 'state', state: { phase: 'idle', project: 'no repo yet' } });
   });
 
   it('speaks through the phone while it is connected, otherwise through the lens', async () => {
@@ -342,8 +377,8 @@ describe('presence and sync', () => {
 describe('trouble the user cannot see', () => {
   it('says so when the Claude login expired', async () => {
     say('Hello');
-    await vi.waitFor(() => expect(sessions.get('api')).toBeDefined());
-    sessions.get('api')!.events.onTrouble('login', 'authentication_failed');
+    await vi.waitFor(() => expect(sessions.get('main')).toBeDefined());
+    sessions.get('main')!.events.onTrouble('login', 'authentication_failed');
     expect(state().card).toMatchObject({ kind: 'error', title: 'Claude login expired' });
     expect(spoken().at(-1)).toMatch(/login on your PC has expired/);
     expect(state().phase).toBe('idle');

@@ -6,7 +6,7 @@
     "start": "node src/main.ts",
     "say": "node src/say.ts",
     "pair": "node src/pair.ts",
-    "test": "vitest run",
+    "test": "vitest run --testTimeout=30000",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

@@ -1,16 +1,11 @@
 {
   "relay": "dev",
-  "defaultProject": "my-app",
-  "projects": [
-    {
-      "name": "my-app",
-      "aliases": ["the app", "frontend"],
-      "path": "C:/code/my-app",
-      "allow": ["Bash(npm run e2e *)"]
-    }
-  ],
+  "workRoot": "C:\\stride-work",
+  "keepDays": 7,
+  "github": { "accounts": ["your-github-login"] },
   "lensCanPrompt": true,
   "askTimeoutSeconds": 180,
   "maxTurns": 60,
-  "deviceTokenDays": 30
+  "deviceTokenDays": 30,
+  "allow": ["Bash(npm run e2e *)"]
 }

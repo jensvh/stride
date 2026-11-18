@@ -1,23 +1,10 @@
 // Checkpoints and change counts through git, without touching the user's
 // index, branches or history. A checkpoint is a tree object of the working
 // directory (tracked and untracked files, .gitignore respected).
-import { execFile } from 'node:child_process';
 import { copyFile, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { promisify } from 'node:util';
-
-const run = promisify(execFile);
-
-async function git(cwd: string, args: string[], env?: Record<string, string>): Promise<string> {
-  const { stdout } = await run('git', args, {
-    cwd,
-    env: { ...process.env, ...env },
-    maxBuffer: 32 * 1024 * 1024,
-    windowsHide: true,
-  });
-  return stdout.replace(/\r?\n$/, '');
-}
+import { git } from './git.ts';
 
 async function topLevel(cwd: string): Promise<string | undefined> {
   try {
@@ -73,4 +60,42 @@ export async function restore(cwd: string, tree: string): Promise<DiffStat | und
   for (const f of created) await rm(resolve(top, f), { force: true });
   await git(top, ['restore', `--source=${tree}`, '--worktree', '--', ':/']);
   return stat;
+}
+
+// ---- several repositories in one work folder ---------------------------------
+
+/** Repository folder name → checkpoint. */
+export type Checkpoint = Record<string, string>;
+
+export async function snapshotAll(root: string, folders: string[]): Promise<Checkpoint> {
+  const cp: Checkpoint = {};
+  for (const f of folders) {
+    const tree = await snapshot(join(root, f));
+    if (tree) cp[f] = tree;
+  }
+  return cp;
+}
+
+const add = (a: DiffStat, b: DiffStat): DiffStat => ({ files: a.files + b.files, added: a.added + b.added, removed: a.removed + b.removed });
+const NONE: DiffStat = { files: 0, added: 0, removed: 0 };
+
+/** What changed between two checkpoints, summed over the repositories in both. */
+export async function diffAll(root: string, before: Checkpoint, after: Checkpoint): Promise<DiffStat> {
+  let total = NONE;
+  for (const [f, tree] of Object.entries(before)) {
+    const now = after[f];
+    if (now && now !== tree) total = add(total, await diffStat(join(root, f), tree, now));
+  }
+  return total;
+}
+
+/** Puts every repository of a checkpoint back. Undefined when one could not be restored. */
+export async function restoreAll(root: string, cp: Checkpoint): Promise<DiffStat | undefined> {
+  let total = NONE;
+  for (const [f, tree] of Object.entries(cp)) {
+    const r = await restore(join(root, f), tree);
+    if (!r) return undefined;
+    total = add(total, r);
+  }
+  return total;
 }

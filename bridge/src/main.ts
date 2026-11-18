@@ -67,8 +67,14 @@ bridge = new Bridge({
   deviceLog: (device, level, msg) => append(`${device}.log`, `${day()} ${stamp()} ${level} ${msg}`),
 });
 
-log(`stride bridge: ${cfg.projects.length} project(s), relay "${cfg.relay}", lens prompting ${cfg.lensCanPrompt ? 'on' : 'off'}`);
+log(`stride bridge: work folders in ${cfg.workRoot}, GitHub ${cfg.github.accounts.join(' + ')}, relay "${cfg.relay}", lens prompting ${cfg.lensCanPrompt ? 'on' : 'off'}`);
 relay.start();
+
+// Say at startup, not on the walk, when a GitHub token is missing or wrong.
+void bridge.github.check().then(({ lines }) => lines.forEach((l) => log(l)));
+log(`work folder ${bridge.workspaces.current().path}`);
+bridge.workspaces.cleanup();
+setInterval(() => bridge?.workspaces.cleanup(), 6 * 3_600_000);
 
 setInterval(() => bridge?.tick(), 10_000);
 // The relay can die silently (sleeping network, NAT timeout): check it and reconnect.

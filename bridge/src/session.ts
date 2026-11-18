@@ -1,16 +1,28 @@
-// One long-lived Claude Code session for one project, fed by a queue.
-import { query, type CanUseTool, type Query, type SDKMessage, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+// One long-lived Claude Code session for one work folder, fed by a queue.
+import { mkdirSync } from 'node:fs';
+import { join } from 'node:path';
+import {
+  query,
+  type CanUseTool,
+  type McpServerConfig,
+  type Options,
+  type Query,
+  type SDKMessage,
+  type SDKUserMessage,
+} from '@anthropic-ai/claude-agent-sdk';
 import type { Visual } from '../../protocol/schema.ts';
 import { VOICE_APPENDIX, describeTool } from './cards.ts';
-import type { Config, Project } from './config.ts';
-import { lensServer } from './showTool.ts';
+import { STATE_DIR, type Config } from './config.ts';
 
-// Commands that are safe to run without asking. Projects add their own in config.json.
+// Commands that are safe to run without asking; config.json can add more.
 // Claude Code's built-in read-only commands (ls, cat, git status, git diff, ...) never ask anyway.
+// Local git writes are allowed too: the work folder is a throwaway clone and
+// nothing leaves it except through publish, which the user approves.
 const BASE_ALLOW = [
-  'mcp__lens__show',
+  'mcp__lens__show', 'mcp__github__find_repos', 'mcp__github__get_repo',
   'Bash(git status)', 'Bash(git status *)', 'Bash(git diff)', 'Bash(git diff *)',
   'Bash(git log)', 'Bash(git log *)', 'Bash(git show *)', 'Bash(git branch)', 'Bash(git branch --list *)',
+  'Bash(git add *)', 'Bash(git commit *)', 'Bash(git switch *)', 'Bash(git checkout -b *)', 'Bash(git stash)', 'Bash(git stash *)',
   'Bash(npm test)', 'Bash(npm test *)', 'Bash(npm run test)', 'Bash(npm run test *)',
   'Bash(npm run lint)', 'Bash(npm run lint *)', 'Bash(npm run build)', 'Bash(npm run build *)',
   'Bash(npm run typecheck)', 'Bash(npm run typecheck *)', 'Bash(npx tsc *)', 'Bash(npx vitest *)',
@@ -25,7 +37,45 @@ const HARD_DENY = [
   'Bash(git reset --hard)', 'Bash(git reset --hard *)', 'Bash(git clean *)',
   'Bash(rm -rf /)', 'Bash(rm -rf /*)', 'Bash(rm -rf ~)', 'Bash(rm -rf ~/*)', 'Bash(rm -rf .git)', 'Bash(rm -rf .git/*)',
   'Bash(shutdown *)', 'Bash(format *)', 'Bash(diskpart *)', 'Bash(reg delete *)',
+  // GitHub only through the bridge's tools, which check the repository is the user's.
+  'Bash(git clone *)', 'Bash(git push *)', 'Bash(git push)', 'Bash(git pull *)', 'Bash(git fetch *)',
+  'Bash(git remote add *)', 'Bash(git remote set-url *)', 'Bash(git submodule *)', 'Bash(git config *)',
+  'Bash(gh *)', 'Bash(gh)',
 ];
+
+/**
+ * The environment Claude's processes get: no relay key, no GitHub tokens, no
+ * gh login and no git credential helper, so nothing it runs can reach GitHub
+ * as the user.
+ */
+export function claudeEnv(base: NodeJS.ProcessEnv = process.env): Record<string, string | undefined> {
+  const env: Record<string, string | undefined> = {};
+  for (const [k, v] of Object.entries(base)) {
+    if (/^(GITHUB_TOKEN|GH_TOKEN|GH_ENTERPRISE_TOKEN|GITHUB_ENTERPRISE_TOKEN|WEBPUBSUB_)/i.test(k)) continue;
+    env[k] = v;
+  }
+  const ghDir = join(STATE_DIR, 'gh-empty');
+  mkdirSync(ghDir, { recursive: true });
+  return {
+    ...env,
+    // One shell, one allowlist: Git Bash only.
+    CLAUDE_CODE_USE_POWERSHELL_TOOL: '0',
+    CLAUDE_AGENT_SDK_CLIENT_APP: 'stride-bridge/0.2.0',
+    GH_CONFIG_DIR: ghDir,
+    GIT_TERMINAL_PROMPT: '0',
+    GCM_INTERACTIVE: 'never',
+    GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_KEY_0: 'credential.helper',
+    GIT_CONFIG_VALUE_0: '',
+  };
+}
+
+/** What a session needs from the bridge: where it works and the tools and hooks it gets. */
+export type SessionSetup = {
+  cwd: string;
+  mcpServers: Record<string, McpServerConfig>;
+  hooks: NonNullable<Options['hooks']>;
+};
 
 class InputQueue implements AsyncIterable<SDKUserMessage> {
   private items: SDKUserMessage[] = [];
@@ -68,20 +118,20 @@ export type SessionEvents = {
   log: (msg: string) => void;
 };
 
-export class ProjectSession {
+export class ClaudeSession {
   busy = false;
   /** Tool calls in the current task. */
   tools = 0;
   private q: Query | undefined;
   private input: InputQueue | undefined;
   private resumeId: string | undefined;
-  private readonly project: Project;
+  private readonly setup: SessionSetup;
   private readonly cfg: Config;
   private readonly canUseTool: CanUseTool;
   private readonly events: SessionEvents;
 
-  constructor(project: Project, cfg: Config, canUseTool: CanUseTool, events: SessionEvents, resumeId?: string) {
-    this.project = project;
+  constructor(setup: SessionSetup, cfg: Config, canUseTool: CanUseTool, events: SessionEvents, resumeId?: string) {
+    this.setup = setup;
     this.cfg = cfg;
     this.canUseTool = canUseTool;
     this.events = events;
@@ -120,25 +170,22 @@ export class ProjectSession {
     const q = query({
       prompt: input,
       options: {
-        cwd: this.project.path,
+        cwd: this.setup.cwd,
         ...(this.resumeId ? { resume: this.resumeId } : {}),
         ...(this.cfg.model ? { model: this.cfg.model } : {}),
         systemPrompt: { type: 'preset', preset: 'claude_code', append: VOICE_APPENDIX },
-        // Project settings only: CLAUDE.md is loaded, but allow rules from your
-        // personal settings cannot bypass the remote approval.
+        // Settings of the work folder only (which has none). Allow rules from your
+        // personal settings, and from a cloned repository's own .claude folder,
+        // cannot bypass the remote approval.
         settingSources: ['project'],
         permissionMode: 'acceptEdits',
-        allowedTools: [...BASE_ALLOW, ...this.cfg.allow, ...this.project.allow],
+        allowedTools: [...BASE_ALLOW, ...this.cfg.allow],
         disallowedTools: HARD_DENY,
         canUseTool: this.canUseTool,
-        mcpServers: { lens: lensServer(this.events.onShow) },
+        mcpServers: this.setup.mcpServers,
+        hooks: this.setup.hooks,
         maxTurns: this.cfg.maxTurns,
-        env: {
-          ...process.env,
-          // One shell, one allowlist: Git Bash only.
-          CLAUDE_CODE_USE_POWERSHELL_TOOL: '0',
-          CLAUDE_AGENT_SDK_CLIENT_APP: 'stride-bridge/0.1.0',
-        },
+        env: claudeEnv(),
         stderr: (data) => this.events.log(`[claude] ${data.trimEnd()}`),
       },
     });

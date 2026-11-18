@@ -14,6 +14,14 @@ How to answer:
 - Do the work instead of describing a plan, unless the task is risky or ambiguous. Ask at most one clarifying question, and only when a wrong guess would waste real time.
 - Shell commands outside the allowlist need the user's spoken approval, which interrupts their walk. Prefer the dedicated file tools and allowed commands, and batch what you need into as few approvals as possible.
 - When a small graphic says it better than a sentence (progress through steps, a few numbers to compare, a tiny table, a short snippet), call the show tool once. Keep it to what fits a glance.
+
+# Where you work
+
+Each conversation starts in its own empty work folder, your current directory. Nothing else on this PC is available: reads, writes and commands that reach outside it are refused.
+- To work on code, call get_repo with the repository name the user said. It clones one of the user's GitHub repositories (their own, their organizations' or ones shared with them) into a subfolder. Other repositories are not available. If several could be meant, ask which one. find_repos lists them.
+- git has no GitHub credentials here: you cannot clone, fetch, pull or push yourself. Committing and branching locally is fine.
+- To deliver changes, call publish with the folder name and a clear title. After the user approves, it commits what is left, pushes a new branch and opens a pull request. Say the pull request number in your answer. Never say something is on GitHub before publish succeeded.
+- The work folder is deleted about a week after its last use. Unpublished work is lost then.
 `.trim();
 
 const stripMd = (s: string) =>
@@ -128,6 +136,12 @@ export function describeTool(name: string, input: Record<string, unknown>): stri
     case 'TaskGet':
     case 'ToolSearch':
       return undefined;
+    case 'mcp__github__get_repo':
+      return `Get ${ellipsis(str(input.name), 40)}`;
+    case 'mcp__github__find_repos':
+      return 'Look up your repos';
+    case 'mcp__github__publish':
+      return `Publish ${ellipsis(str(input.repo), 36)}`;
     default:
       if (name.startsWith('mcp__lens__')) return undefined;
       if (name.startsWith('mcp__')) return ellipsis(name.split('__').slice(1).join(' '), 44);
@@ -144,8 +158,14 @@ export function describeAsk(tool: string, input: Record<string, unknown>): { tit
   }
   if (tool === 'WebFetch') return { title: `Fetch ${ellipsis(str(input.url), 100)}` };
   if (tool === 'WebSearch') return { title: `Search the web: ${ellipsis(str(input.query), 90)}` };
+  if (tool === 'mcp__github__publish') {
+    return {
+      title: `Publish ${ellipsis(str(input.repo), 30)}: ${ellipsis(str(input.title), 80)}`,
+      detail: 'Pushes a new branch and opens a pull request on GitHub',
+    };
+  }
   if (tool === 'Edit' || tool === 'Write' || tool === 'MultiEdit') {
-    return { title: `Edit outside the project: ${file(str(input.file_path))}` };
+    return { title: `Edit ${file(str(input.file_path))}` };
   }
   if (tool.startsWith('mcp__')) return { title: `Use ${tool.split('__').slice(1).join(' ')}` };
   return { title: `Use ${tool}`, detail: ellipsis(JSON.stringify(input), 160) };

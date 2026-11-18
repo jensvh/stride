@@ -1,19 +1,23 @@
-// The conductor: takes messages from devices, runs Claude sessions, and keeps
-// the one State object that every device renders from.
+// The conductor: takes messages from devices, runs the Claude session of the
+// current work folder, and keeps the one State object every device renders from.
 import { randomUUID } from 'node:crypto';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { CanUseTool } from '@anthropic-ai/claude-agent-sdk';
 import { Device, Up, type Card, type CommandName, type Down, type Visual } from '../../protocol/schema.ts';
 import { errorCard, resultCard, speakAsk, speechFor } from './cards.ts';
 import { matchProject, route } from './commands.ts';
-import { STATE_DIR, type Config, type Project } from './config.ts';
+import { STATE_DIR, type Config } from './config.ts';
+import { GitHub } from './github.ts';
+import { guardHook } from './guard.ts';
 import { Asks, permissionHandler } from './permissions.ts';
-import { ProjectSession, type SessionEvents, type TurnResult } from './session.ts';
+import { githubServer, publishHook, type RepoToolsContext } from './repoTools.ts';
+import { ClaudeSession, type SessionEvents, type SessionSetup, type TurnResult } from './session.ts';
+import { lensServer } from './showTool.ts';
 import { Store } from './state.ts';
-import { diffStat, restore, snapshot } from './stats.ts';
+import { diffAll, restoreAll, snapshotAll, type Checkpoint } from './stats.ts';
+import { Workspaces } from './workspace.ts';
 
-export type SessionLike = Pick<ProjectSession, 'busy' | 'tools' | 'send' | 'interrupt' | 'dispose'>;
+export type SessionLike = Pick<ClaudeSession, 'busy' | 'tools' | 'send' | 'interrupt' | 'dispose'>;
 
 export type BridgeDeps = {
   cfg: Config;
@@ -21,25 +25,16 @@ export type BridgeDeps = {
   log: (msg: string) => void;
   walkLog?: (who: 'you' | 'claude' | 'bridge', text: string) => void;
   deviceLog?: (device: Device, level: string, msg: string) => void;
-  /** Tests inject a fake; production uses the Agent SDK. */
-  makeSession?: (project: Project, canUseTool: CanUseTool, events: SessionEvents, resumeId?: string) => SessionLike;
-  sessionsFile?: string;
+  /** Tests inject fakes; production uses the Agent SDK, GitHub and folders under cfg.workRoot. */
+  makeSession?: (setup: SessionSetup, canUseTool: CanUseTool, events: SessionEvents, resumeId?: string) => SessionLike;
+  github?: GitHub;
+  workspaces?: Workspaces;
 };
 
-type Runtime = {
-  project: Project;
-  session?: SessionLike;
-  card?: Card;
-  task?: { before: string | undefined; startedAt: number; prompt: string };
-  /** Checkpoints taken before tasks that changed files, newest last. */
-  undo: string[];
-  /** Something Claude must know before the next prompt (for example that files were reverted). */
-  preface?: string;
-  visual?: Visual;
-  stopping?: boolean;
-};
+type Task = { before: Checkpoint; startedAt: number; prompt: string };
 
 const PHONE_FRESH_MS = 45_000;
+const NO_REPO = 'no repo yet';
 
 const spokenDuration = (ms: number) => {
   const s = Math.round(ms / 1000);
@@ -50,33 +45,33 @@ const spokenDuration = (ms: number) => {
 export class Bridge {
   readonly store: Store;
   readonly asks: Asks;
+  readonly workspaces: Workspaces;
+  readonly github: GitHub;
   private readonly deps: BridgeDeps;
-  private readonly runtimes = new Map<string, Runtime>();
-  private active: Runtime;
   private readonly seen = new Map<Device, number>();
   private lastSpeech: string | undefined;
-  private readonly sessionsFile: string;
-  private savedSessions: Record<string, string> = {};
   private readonly canUseTool: CanUseTool;
+
+  private session: SessionLike | undefined;
+  private card: Card | undefined;
+  private task: Task | undefined;
+  /** Checkpoints taken before tasks that changed files, newest last. */
+  private undo: Checkpoint[] = [];
+  /** Something Claude must know before the next prompt (for example that files were reverted). */
+  private preface: string | undefined;
+  private visual: Visual | undefined;
+  private stopping = false;
 
   constructor(deps: BridgeDeps) {
     this.deps = deps;
     const { cfg } = deps;
-    for (const p of cfg.projects) this.runtimes.set(p.name, { project: p, undo: [] });
-    const first = cfg.projects.find((p) => p.name.toLowerCase() === cfg.defaultProject?.toLowerCase()) ?? cfg.projects[0]!;
-    this.active = this.runtimes.get(first.name)!;
-
-    this.sessionsFile = deps.sessionsFile ?? join(STATE_DIR, 'sessions.json');
-    if (existsSync(this.sessionsFile)) {
-      try {
-        this.savedSessions = JSON.parse(readFileSync(this.sessionsFile, 'utf8')) as Record<string, string>;
-      } catch {
-        this.savedSessions = {};
-      }
-    }
+    this.workspaces =
+      deps.workspaces ??
+      new Workspaces({ root: cfg.workRoot, keepDays: cfg.keepDays, stateFile: join(STATE_DIR, 'workspace.json'), log: deps.log });
+    this.github = deps.github ?? new GitHub({ accounts: cfg.github.accounts, log: deps.log });
 
     this.store = new Store(
-      { project: first.name, projects: cfg.projects.map((p) => p.name), phase: 'idle', phone: false, lensCanPrompt: cfg.lensCanPrompt },
+      { project: this.label(), projects: this.workspaces.repos(), phase: 'idle', phone: false, lensCanPrompt: cfg.lensCanPrompt },
       (state) => deps.send({ v: 1, t: 'state', state }),
     );
 
@@ -93,12 +88,17 @@ export class Bridge {
         deps.walkLog?.('claude', `asks: ${ask.title}`);
       },
       onClose: (ask, answer) => {
-        this.store.set({ ask: undefined, phase: this.active.session?.busy ? 'working' : 'idle' });
+        this.store.set({ ask: undefined, phase: this.session?.busy ? 'working' : 'idle' });
         deps.walkLog?.('you', `${answer.reason ?? answer.choice}${answer.text ? `: ${answer.text}` : ''} (${ask.title})`);
         if (answer.reason === 'timeout') this.speak('No answer, so I denied it.', false);
       },
     });
     this.canUseTool = permissionHandler(this.asks, deps.log);
+  }
+
+  /** What the lens shows at the top: the repository being worked on. */
+  private label(): string {
+    return this.workspaces.current().focus ?? NO_REPO;
   }
 
   // ---- input from devices ---------------------------------------------------
@@ -160,7 +160,7 @@ export class Bridge {
 
   shutdown(): void {
     this.asks.cancel();
-    for (const rt of this.runtimes.values()) rt.session?.dispose();
+    this.session?.dispose();
   }
 
   private touch(device: Device): void {
@@ -178,7 +178,7 @@ export class Bridge {
     const ask = this.asks.pending;
     const routed = route(text, {
       ...(ask ? { ask: { kind: ask.kind, ...(ask.options ? { options: ask.options.map((o) => o.label) } : {}) } } : {}),
-      projects: this.deps.cfg.projects,
+      projects: this.workspaces.repos().map((name) => ({ name, aliases: [] })),
     });
     if (this.store.state.phase === 'listening') this.store.set({ phase: 'idle', transcript: undefined });
     this.deps.walkLog?.('you', text);
@@ -206,16 +206,15 @@ export class Bridge {
   }
 
   private async startTask(text: string): Promise<void> {
-    const rt = this.active;
-    const session = this.sessionFor(rt);
+    const session = this.sessionFor();
     if (session.busy) {
       // Claude is mid-task: the words join the running conversation.
       session.send(text);
       this.store.set({ note: 'Added to the running task' });
       return;
     }
-    rt.stopping = false;
-    rt.visual = undefined;
+    this.stopping = false;
+    this.visual = undefined;
     this.store.set({
       phase: 'working',
       transcript: text,
@@ -224,91 +223,115 @@ export class Bridge {
       live: undefined,
       note: undefined,
     });
-    const before = await snapshot(rt.project.path);
-    rt.task = { before, startedAt: Date.now(), prompt: text };
-    session.send(rt.preface ? `${rt.preface}\n\n${text}` : text);
-    rt.preface = undefined;
+    this.workspaces.touch();
+    const ws = this.workspaces.current();
+    const before = await snapshotAll(ws.path, this.workspaces.repos());
+    this.task = { before, startedAt: Date.now(), prompt: text };
+    session.send(this.preface ? `${this.preface}\n\n${text}` : text);
+    this.preface = undefined;
   }
 
-  private sessionFor(rt: Runtime): SessionLike {
-    if (rt.session) return rt.session;
+  private sessionFor(): SessionLike {
+    if (this.session) return this.session;
+    const ws = this.workspaces.current();
     const events: SessionEvents = {
       onActivity: (line) => {
-        if (this.active === rt && this.store.state.phase === 'working') this.store.set({ activity: line });
+        if (this.store.state.phase === 'working') this.store.set({ activity: line });
       },
       onShow: (title, visual) => {
-        rt.visual = visual;
-        if (this.active === rt) this.store.set({ live: { ...(title ? { title } : {}), visual } });
+        this.visual = visual;
+        this.store.set({ live: { ...(title ? { title } : {}), visual } });
       },
-      onResult: (r) => void this.finishTask(rt, r).catch((err) => this.deps.log(`finish failed: ${String(err)}`)),
-      onSessionId: (id) => {
-        this.savedSessions[rt.project.name] = id;
-        this.saveSessions();
-      },
-      onTrouble: (kind, detail) => this.trouble(rt, kind, detail),
-      log: (msg) => this.deps.log(`[${rt.project.name}] ${msg}`),
+      onResult: (r) => void this.finishTask(r).catch((err) => this.deps.log(`finish failed: ${String(err)}`)),
+      onSessionId: (id) => this.workspaces.update({ sessionId: id }),
+      onTrouble: (kind, detail) => this.trouble(kind, detail),
+      log: (msg) => this.deps.log(msg),
     };
-    const make = this.deps.makeSession ?? ((p, can, ev, resume) => new ProjectSession(p, this.deps.cfg, can, ev, resume));
-    rt.session = make(rt.project, this.canUseTool, events, this.savedSessions[rt.project.name]);
-    return rt.session;
+    const repoCtx: RepoToolsContext = {
+      github: this.github,
+      workspace: () => this.workspaces.current().path,
+      onCloned: (folder) => {
+        this.workspaces.update({ focus: folder });
+        this.store.set({ project: folder, projects: this.workspaces.repos() });
+      },
+      log: this.deps.log,
+    };
+    const setup: SessionSetup = {
+      cwd: ws.path,
+      mcpServers: { lens: lensServer(events.onShow), github: githubServer(repoCtx) },
+      hooks: {
+        PreToolUse: [
+          { hooks: [guardHook(() => this.workspaces.current().path)] },
+          { matcher: 'mcp__github__publish', hooks: [publishHook(repoCtx)] },
+        ],
+      },
+    };
+    const make = this.deps.makeSession ?? ((s, can, ev, resume) => new ClaudeSession(s, this.deps.cfg, can, ev, resume));
+    this.session = make(setup, this.canUseTool, events, ws.sessionId);
+    return this.session;
   }
 
-  private async finishTask(rt: Runtime, r: TurnResult): Promise<void> {
-    const task = rt.task;
+  private async finishTask(r: TurnResult): Promise<void> {
+    const task = this.task;
     const id = randomUUID().slice(0, 8);
+    const where = this.label();
     let card: Card;
     let speech: string | undefined;
 
     // Whatever the outcome, remember how to get back if files changed.
-    const after = task?.before ? await snapshot(rt.project.path) : undefined;
-    const diff = task?.before && after && after !== task.before ? await diffStat(rt.project.path, task.before, after) : undefined;
-    if (task?.before && diff && diff.files > 0) {
-      rt.undo.push(task.before);
-      if (rt.undo.length > 10) rt.undo.shift();
+    const root = this.workspaces.current().path;
+    const after = task ? await snapshotAll(root, Object.keys(task.before)) : undefined;
+    const diff = task && after ? await diffAll(root, task.before, after) : undefined;
+    if (task && diff && diff.files > 0) {
+      this.undo.push(task.before);
+      if (this.undo.length > 10) this.undo.shift();
     }
 
-    if (rt.stopping) {
+    if (this.stopping) {
       const lines = diff && diff.files > 0 ? [`${diff.files} ${diff.files === 1 ? 'file was' : 'files were'} changed before the stop. Say "undo that" to revert.`] : [];
-      card = { id, kind: 'info', title: 'Stopped', lines, project: rt.project.name, at: Date.now() };
+      card = { id, kind: 'info', title: 'Stopped', lines, project: where, at: Date.now() };
     } else if (r.ok) {
       card = resultCard({
         id,
-        project: rt.project.name,
+        project: where,
         text: r.text,
         stats: {
           durationS: Math.round((Date.now() - (task?.startedAt ?? Date.now())) / 1000),
-          tools: rt.session?.tools ?? 0,
+          tools: this.session?.tools ?? 0,
           ...(diff && diff.files > 0 ? diff : {}),
         },
-        ...(rt.visual ? { visual: rt.visual } : {}),
+        ...(this.visual ? { visual: this.visual } : {}),
       });
       speech = speechFor(r.text);
     } else if (r.subtype === 'error_max_turns') {
-      card = errorCard(id, rt.project.name, 'Hit the step limit', 'Say "continue" to keep going.');
+      card = errorCard(id, where, 'Hit the step limit', 'Say "continue" to keep going.');
       speech = 'I hit the step limit. Say continue to keep going.';
     } else {
-      card = errorCard(id, rt.project.name, 'Something went wrong', r.text || r.subtype);
+      card = errorCard(id, where, 'Something went wrong', r.text || r.subtype);
       speech = `Something went wrong. ${speechFor(r.text).slice(0, 160)}`;
     }
 
-    rt.card = card;
-    rt.task = undefined;
-    rt.stopping = false;
+    this.card = card;
+    this.task = undefined;
+    this.stopping = false;
     this.deps.walkLog?.('claude', `${card.title}${card.lines.length ? ` — ${card.lines.join(' ')}` : ''}`);
-
-    if (this.active === rt) {
-      this.store.set({ phase: this.asks.pending ? 'asking' : 'idle', card, activity: undefined, startedAt: undefined, live: undefined, transcript: undefined });
-      if (speech) this.speak(speech);
-    } else if (speech) {
-      // The user moved on to another project; tell them, but do not take over the lens.
-      this.speak(`${rt.project.name} finished: ${card.title}.`);
-    }
+    this.store.set({
+      phase: this.asks.pending ? 'asking' : 'idle',
+      card,
+      project: where,
+      projects: this.workspaces.repos(),
+      activity: undefined,
+      startedAt: undefined,
+      live: undefined,
+      transcript: undefined,
+    });
+    if (speech) this.speak(speech);
   }
 
-  private trouble(rt: Runtime, kind: 'login' | 'limit' | 'crash' | 'overloaded', detail: string): void {
-    this.deps.log(`[${rt.project.name}] trouble: ${kind} (${detail})`);
+  private trouble(kind: 'login' | 'limit' | 'crash' | 'overloaded', detail: string): void {
+    this.deps.log(`trouble: ${kind} (${detail})`);
     if (kind === 'overloaded') {
-      if (this.active === rt) this.store.set({ note: 'Claude is busy, retrying' });
+      this.store.set({ note: 'Claude is busy, retrying' });
       return;
     }
     const [title, spoken] =
@@ -317,35 +340,32 @@ export class Bridge {
         : kind === 'limit'
           ? ['Usage limit reached', 'Your Claude usage limit is reached. Try again later.']
           : ['Claude stopped unexpectedly', 'The Claude process on your PC stopped. Your next request starts it again.'];
-    rt.card = errorCard(randomUUID().slice(0, 8), rt.project.name, title, kind === 'crash' ? detail : undefined);
-    rt.task = undefined;
+    this.card = errorCard(randomUUID().slice(0, 8), this.label(), title, kind === 'crash' ? detail : undefined);
+    this.task = undefined;
     if (kind === 'crash') {
-      rt.session?.dispose();
-      rt.session = undefined;
+      this.session?.dispose();
+      this.session = undefined;
     }
-    if (this.active === rt) {
-      this.store.set({ phase: 'idle', card: rt.card, activity: undefined, startedAt: undefined, live: undefined });
-    }
+    this.store.set({ phase: 'idle', card: this.card, activity: undefined, startedAt: undefined, live: undefined });
     this.speak(spoken);
   }
 
   // ---- commands --------------------------------------------------------------
 
   private async command(name: CommandName, arg?: string): Promise<void> {
-    const rt = this.active;
     switch (name) {
       case 'talk':
         this.deps.send({ v: 1, t: 'listen', on: true });
         break;
 
       case 'stop':
-        if (!rt.session?.busy && !this.asks.pending) {
+        if (!this.session?.busy && !this.asks.pending) {
           this.speak('Nothing is running.', false);
           break;
         }
-        rt.stopping = true;
+        this.stopping = true;
         this.asks.cancel();
-        await rt.session?.interrupt();
+        await this.session?.interrupt();
         this.speak('Stopped.', false);
         break;
 
@@ -358,27 +378,27 @@ export class Bridge {
         break;
 
       case 'undo': {
-        if (rt.session?.busy) {
+        if (this.session?.busy) {
           this.speak('Claude is still working. Say stop first.', false);
           break;
         }
-        const point = rt.undo.at(-1);
+        const point = this.undo.at(-1);
         if (!point) {
           this.speak('Nothing to undo.', false);
           break;
         }
-        const reverted = await restore(rt.project.path, point);
+        const reverted = await restoreAll(this.workspaces.current().path, point);
         if (!reverted) {
           this.speak('I could not undo that.', false);
           break;
         }
-        rt.undo.pop();
+        this.undo.pop();
         const msg = reverted.files === 0 ? 'Nothing had changed.' : `Undone. ${reverted.files} ${reverted.files === 1 ? 'file' : 'files'} restored.`;
-        rt.card = { id: randomUUID().slice(0, 8), kind: 'info', title: reverted.files === 0 ? 'Nothing to undo' : 'Undone', lines: [msg], project: rt.project.name, at: Date.now() };
-        this.store.set({ card: rt.card, note: undefined });
+        this.card = { id: randomUUID().slice(0, 8), kind: 'info', title: reverted.files === 0 ? 'Nothing to undo' : 'Undone', lines: [msg], project: this.label(), at: Date.now() };
+        this.store.set({ card: this.card, note: undefined });
         // Claude must know the files changed under it; it hears so with the next prompt.
         if (reverted.files > 0) {
-          rt.preface = '(Note from the bridge: the user said "undo that", so the file changes from your previous task were reverted on disk. Re-read files before editing and do not redo those changes unless asked.)';
+          this.preface = '(Note from the bridge: the user said "undo that", so the file changes from your previous task were reverted on disk. Commits stay. Re-read files before editing and do not redo those changes unless asked.)';
         }
         this.speak(msg, false);
         break;
@@ -386,37 +406,37 @@ export class Bridge {
 
       case 'new':
         this.asks.cancel();
-        rt.session?.dispose(true);
-        rt.session = undefined;
-        rt.card = undefined;
-        rt.task = undefined;
-        rt.undo = [];
-        delete this.savedSessions[rt.project.name];
-        this.saveSessions();
-        this.store.set({ phase: 'idle', card: undefined, activity: undefined, startedAt: undefined, live: undefined, transcript: undefined });
-        this.speak(`New session in ${rt.project.name}.`, false);
+        this.session?.dispose(true);
+        this.session = undefined;
+        this.card = undefined;
+        this.task = undefined;
+        this.undo = [];
+        this.preface = undefined;
+        this.workspaces.fresh();
+        this.store.set({
+          phase: 'idle',
+          project: this.label(),
+          projects: [],
+          card: undefined,
+          activity: undefined,
+          startedAt: undefined,
+          live: undefined,
+          transcript: undefined,
+          note: undefined,
+        });
+        this.speak('New session with an empty work folder. Which repo?', false);
         break;
 
       case 'switch': {
-        const target = arg ? matchProject(arg, this.deps.cfg.projects) : undefined;
-        const next = target ? this.runtimes.get(target) : undefined;
-        if (!next) {
-          this.speak(`I don't know a project called ${arg ?? 'that'}.`, false);
+        const target = arg ? matchProject(arg, this.workspaces.repos().map((n) => ({ name: n, aliases: [] }))) : undefined;
+        if (!target) {
+          this.speak(`There is no ${arg ?? 'such'} repo in this session yet. Ask me to get it.`, false);
           break;
         }
-        this.active = next;
-        const busy = next.session?.busy ?? false;
-        this.store.set({
-          project: next.project.name,
-          phase: this.asks.pending ? 'asking' : busy ? 'working' : 'idle',
-          card: next.card,
-          transcript: busy ? next.task?.prompt : undefined,
-          activity: busy ? 'Working' : undefined,
-          startedAt: busy ? next.task?.startedAt : undefined,
-          live: undefined,
-          note: undefined,
-        });
-        this.speak(`Switched to ${next.project.name}.${busy ? ' It is still working.' : ''}`, false);
+        this.workspaces.update({ focus: target });
+        this.preface = `(Note from the bridge: the user switched to the "${target}" folder. Work there from now on.)`;
+        this.store.set({ project: target, note: undefined });
+        this.speak(`Switched to ${target}.`, false);
         break;
       }
     }
@@ -424,12 +444,14 @@ export class Bridge {
 
   private statusText(): string {
     const s = this.store.state;
+    const focus = this.workspaces.current().focus;
     if (s.ask) return `Waiting for you. ${s.ask.title}`;
     if (s.phase === 'working') {
       const since = s.startedAt ? ` for ${spokenDuration(Date.now() - s.startedAt)}` : '';
-      return `Working on ${s.project}${since}. ${s.activity ?? ''}`.trim();
+      return `Working${focus ? ` on ${focus}` : ''}${since}. ${s.activity ?? ''}`.trim();
     }
-    return s.card ? `${s.project} is idle. Last result: ${s.card.title}.` : `${s.project} is idle.`;
+    const idle = focus ? `${focus} is idle.` : 'Idle, no repo yet.';
+    return s.card ? `${idle} Last result: ${s.card.title}.` : idle;
   }
 
   // ---- speech out --------------------------------------------------------------
@@ -438,13 +460,5 @@ export class Bridge {
     if (remember) this.lastSpeech = text;
     const phoneFresh = Date.now() - (this.seen.get('phone') ?? 0) < PHONE_FRESH_MS;
     this.deps.send({ v: 1, t: 'speak', id: randomUUID().slice(0, 8), text, to: phoneFresh ? 'phone' : 'lens' });
-  }
-
-  private saveSessions(): void {
-    try {
-      writeFileSync(this.sessionsFile, JSON.stringify(this.savedSessions, null, 2));
-    } catch (err) {
-      this.deps.log(`could not save sessions: ${String(err)}`);
-    }
   }
 }
