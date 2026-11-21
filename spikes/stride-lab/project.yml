@@ -1,0 +1,81 @@
+# XcodeGen recipe for Stride Lab, the guided test app. There is no Mac in this
+# project: GitHub Actions generates the Xcode project from this file and builds
+# an unsigned .ipa (.github/workflows/ios.yml).
+name: StrideLab
+options:
+  deploymentTarget:
+    iOS: "17.2"
+packages:
+  # Meta Wearables Device Access Toolkit: camera, photos, display and inputs.
+  MWDAT:
+    url: https://github.com/meta/meta-wearables-dat-ios
+    exactVersion: 1.0.1
+settings:
+  base:
+    # Swift 5 language mode: written without a local compiler, so Swift 6's
+    # strict concurrency checks would only add build round trips.
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  StrideLab:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+    dependencies:
+      - package: MWDAT
+        product: MWDATCore
+      - package: MWDAT
+        product: MWDATCamera
+      - package: MWDAT
+        product: MWDATDisplay
+      - package: MWDAT
+        product: MWDATInputs
+    scheme: {}
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: Stride Lab
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        # Keeps the microphone, the STT socket and the glasses link alive while
+        # the screen is off.
+        UIBackgroundModes:
+          - audio
+          - bluetooth-central
+          - bluetooth-peripheral
+          - processing
+        NSMicrophoneUsageDescription: Stride Lab tests the microphone of your glasses.
+        NSBluetoothAlwaysUsageDescription: Needed to connect to your Meta glasses.
+        NSBluetoothPeripheralUsageDescription: Needed to connect to your Meta glasses.
+        NSLocalNetworkUsageDescription: Needed to stream video from your Meta glasses.
+        NSBonjourServices:
+          - _bonjour._tcp
+        NSCameraUsageDescription: Stride Lab shows the camera of your glasses.
+        NSPhotoLibraryAddUsageDescription: Stride Lab can save photos taken with your glasses.
+        ITSAppUsesNonExemptEncryption: false
+        # The results file shows up in the Files app under "On My iPhone".
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        CFBundleURLTypes:
+          - CFBundleURLName: stridelab
+            CFBundleTypeRole: Editor
+            CFBundleURLSchemes:
+              - stridelab
+        # Device Access Toolkit. In Developer Mode no Meta app ID is needed;
+        # the Meta AI app returns to this app through the URL scheme.
+        MWDAT:
+          AppLinkURLScheme: stridelab://
+          Analytics:
+            OptOut: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.jensvh.stride.lab
+        TARGETED_DEVICE_FAMILY: "1"
+        GENERATE_INFOPLIST_FILE: NO
+        # The app is signed later, on Windows, with your Apple ID.
+        CODE_SIGNING_ALLOWED: NO

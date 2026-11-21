@@ -52,6 +52,35 @@ if (process.argv.includes('--probe')) {
   process.exit(0);
 }
 
+// `npm run pair -- --lab`: hands the STT server address and key from
+// bridge/.env to the Stride Lab iPhone app. The page holds the key: keep it on
+// this PC, delete it after scanning.
+if (process.argv.includes('--lab')) {
+  const url = process.env.STT_URL ?? '';
+  const key = process.env.STT_API_KEY ?? '';
+  if (!url || !key) {
+    console.error('Set STT_URL and STT_API_KEY in bridge/.env first.');
+    process.exit(1);
+  }
+  const link = `stridelab://config?stt=${encodeURIComponent(url)}&key=${encodeURIComponent(key)}`;
+  const file = join(STATE_DIR, 'lab.html');
+  writeFileSync(file, `<!doctype html>
+<meta charset="utf-8">
+<title>Stride Lab settings</title>
+<style>${style}
+  main { max-width: 420px; display: block; }</style>
+<main>
+  <section>
+    <h1>Stride Lab: speech-to-text server</h1>
+    <p>Scan with the iPhone camera once Stride Lab is installed. It opens the app and saves the server address and key (in the iPhone's Keychain). This code holds your key: don't share it, and delete this file after scanning.</p>
+    ${await qr(link)}
+  </section>
+</main>
+`);
+  console.log(`\nStride Lab page written. Open it on this PC and scan the code:\n\n  ${pathToFileURL(file).href}\n\nIt holds your STT key: delete it after scanning.\n`);
+  process.exit(0);
+}
+
 const lensBase = cfg.relay === 'dev' ? 'http://localhost:5173/' : cfg.lensUrl;
 if (!lensBase) needLensUrl();
 

@@ -6,7 +6,7 @@ name: iPhone build
 
 on:
   push:
-    paths: ['spikes/ios-audio-probe/**', '.github/workflows/ios.yml']
+    paths: ['spikes/ios-audio-probe/**', 'spikes/stride-lab/**', '.github/workflows/ios.yml']
   workflow_dispatch:
 
 permissions:
@@ -49,4 +49,64 @@ jobs:
         with:
           name: StrideProbe
           path: spikes/ios-audio-probe/StrideProbe.ipa
+          if-no-files-found: error
+
+  lab:
+    name: Stride Lab
+    runs-on: macos-26
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: spikes/stride-lab
+    steps:
+      - uses: actions/checkout@v7
+      - name: Select Xcode (pinned, so a runner update cannot change the build)
+        run: sudo xcode-select -s /Applications/Xcode_26.6.app && xcodebuild -version
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate the Xcode project
+        run: xcodegen generate
+      - name: Fetch Meta's Device Access Toolkit
+        run: xcodebuild -resolvePackageDependencies -project StrideLab.xcodeproj -scheme StrideLab -derivedDataPath build
+      # The toolkit's public Swift API, straight from the binaries: the
+      # reference for writing this app without a Mac.
+      - name: Save the toolkit's API
+        run: |
+          mkdir -p api
+          find build/SourcePackages -name '*.swiftinterface' -path '*ios-arm64/*' ! -path '*simulator*' ! -name '*.private.swiftinterface' \
+            -exec cp {} api/ \; || true
+          find build/SourcePackages/checkouts -maxdepth 2 -name Package.swift -exec cp {} api/Package.swift.txt \; || true
+          ls -l api
+      - uses: actions/upload-artifact@v7
+        with:
+          name: StrideLab-api
+          path: spikes/stride-lab/api
+      - name: Build without signing
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project StrideLab.xcodeproj -scheme StrideLab \
+            -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            | tee build.log | grep -E 'error:|warning: unre|BUILD' || true
+          grep -q 'BUILD SUCCEEDED' build.log
+      - name: Keep the build errors
+        if: failure()
+        run: grep -E 'error:' build.log | sort -u | head -200 > errors.txt || true
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: StrideLab-errors
+          path: spikes/stride-lab/errors.txt
+      - name: Package the .ipa
+        run: |
+          mkdir Payload
+          cp -R build/Build/Products/Release-iphoneos/StrideLab.app Payload/
+          zip -qry StrideLab.ipa Payload
+          ls -l StrideLab.ipa
+      - uses: actions/upload-artifact@v7
+        with:
+          name: StrideLab
+          path: spikes/stride-lab/StrideLab.ipa
           if-no-files-found: error
