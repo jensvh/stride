@@ -52,21 +52,17 @@ final class GlassesDisplay: ObservableObject {
     }
 
     private func card(title: String, body: String) -> FlexBox {
-        FlexBox(direction: .column, spacing: 16, alignment: .start, crossAlignment: .start, wrap: false, padding: nil) {
-            [
-                Text(title, style: .title, color: .primary),
-                Text(body, style: .body, color: .secondary),
-                FlexBox(direction: .row, spacing: 12, alignment: .start, crossAlignment: .center, wrap: false, padding: nil) {
-                    [
-                        Button(label: "Yes", style: .primary, iconName: nil, onClick: { [weak self] in
-                            Task { @MainActor in self?.chose("Yes") }
-                        }),
-                        Button(label: "No", style: .secondary, iconName: nil, onClick: { [weak self] in
-                            Task { @MainActor in self?.chose("No") }
-                        }),
-                    ]
-                },
-            ]
+        FlexBox(direction: .column, spacing: 16, alignment: .start, crossAlignment: .start) {
+            Text(title, style: .heading, color: .primary)
+            Text(body, style: .body, color: .secondary)
+            ButtonGroup(alignment: .start) {
+                Button(label: "Yes", style: .primary, onClick: { [weak self] in
+                    Task { @MainActor in self?.chose("Yes") }
+                })
+                Button(label: "No", style: .secondary, onClick: { [weak self] in
+                    Task { @MainActor in self?.chose("No") }
+                })
+            }
         }
     }
 
@@ -77,8 +73,11 @@ final class GlassesDisplay: ObservableObject {
     }
 
     func clear() {
-        display?.clearDisplay()
         choices = []
+        guard let display else { return }
+        Task { [weak self] in
+            do { try await display.clearDisplay() } catch { self?.onLog?("display clear failed: \(error)") }
+        }
     }
 
     func stop() {
@@ -94,7 +93,11 @@ final class GlassesDisplay: ObservableObject {
     func startInputs(on session: DeviceSession) {
         guard inputsCapability == nil else { return }
         do {
-            let capability = try session.addInputs()
+            guard let capability = try session.addInputs() else {
+                inputsState = "not available"
+                onLog?("inputs: not available on these glasses")
+                return
+            }
             inputsCapability = capability
             inputsState = "listening"
             onLog?("inputs: listening")

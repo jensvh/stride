@@ -73,8 +73,9 @@ jobs:
       - name: Save the toolkit's API
         run: |
           mkdir -p api
-          find build/SourcePackages -name '*.swiftinterface' -path '*ios-arm64/*' ! -path '*simulator*' ! -name '*.private.swiftinterface' \
-            -exec cp {} api/ \; || true
+          # Every module's file is called arm64-apple-ios.swiftinterface: name the copy after its module.
+          find build/SourcePackages -name '*.swiftinterface' -path '*ios-arm64/*' ! -path '*simulator*' ! -name '*.private.swiftinterface' |
+            while read -r f; do m=$(basename "$(dirname "$f")" .swiftmodule); cp "$f" "api/$m.swiftinterface"; done || true
           find build/SourcePackages/checkouts -maxdepth 2 -name Package.swift -exec cp {} api/Package.swift.txt \; || true
           ls -l api
       - uses: actions/upload-artifact@v7
