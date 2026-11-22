@@ -18,6 +18,9 @@ final class GlassesDisplay: ObservableObject {
     @Published private(set) var inputsState = "off"
     @Published private(set) var sendMs: Int?
     private(set) var lastError = ""
+    /// Set when the session refuses a new display or inputs (already active):
+    /// only a new session can bring them back.
+    private(set) var needsNewSession = false
 
     var onLog: ((String) -> Void)?
     var onChoice: ((String) -> Void)?
@@ -31,8 +34,12 @@ final class GlassesDisplay: ObservableObject {
 
     /// Shows a card with Yes/No buttons. Returns false (with lastError) if the
     /// display could not be reached.
-    func show(on session: DeviceSession, title: String, body: String) async -> Bool {
-        guard let display = await attachDisplay(to: session) else { return false }
+    ///
+    /// fresh: restart the display first. A display can report "started" while
+    /// the lens shows Meta's home screen (after you leave the app on the
+    /// glasses); starting it again is what puts this app back on the lens.
+    func show(on session: DeviceSession, title: String, body: String, fresh: Bool = true) async -> Bool {
+        guard let display = await attachDisplay(to: session, fresh: fresh) else { return false }
         do {
             let started = Date()
             try await display.send(card(title: title, body: body))
@@ -46,9 +53,17 @@ final class GlassesDisplay: ObservableObject {
         }
     }
 
-    private func attachDisplay(to session: DeviceSession) async -> Display? {
-        if let display, display.state == .started { return display }
-        if let display { display.stop(); self.display = nil }
+    private func attachDisplay(to session: DeviceSession, fresh: Bool) async -> Display? {
+        needsNewSession = false
+        if let display, display.state == .started, !fresh { return display }
+        if let display {
+            onLog?("display: restarting it")
+            display.stop()
+            for _ in 0..<20 where display.state != .stopped {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+            self.display = nil
+        }
         var lastFailure = ""
         for attempt in 1...15 {
             do {
@@ -74,6 +89,12 @@ final class GlassesDisplay: ObservableObject {
                 display = nil
             } catch {
                 lastFailure = "\(error)"
+                if case DeviceSessionError.capabilityAlreadyActive = error {
+                    needsNewSession = true
+                    lastError = "the session still holds the old display"
+                    onLog?("display: \(lastError), a new session is needed")
+                    return nil
+                }
             }
             onLog?("display: attempt \(attempt) failed: \(lastFailure)")
             try? await Task.sleep(nanoseconds: 1_000_000_000)
@@ -124,8 +145,15 @@ final class GlassesDisplay: ObservableObject {
     // MARK: Inputs (touchpad, Neural Band, buttons)
 
     /// Returns false (with lastError) if the inputs could not be attached.
+    /// Always starts fresh: a tap on Start listening replaces the old listener
+    /// (it may belong to a session the glasses ended).
     func startInputs(on session: DeviceSession) async -> Bool {
-        if inputsCapability != nil { return true }
+        needsNewSession = false
+        if inputsCapability != nil {
+            stopInputs()
+            do { try session.removeInputs() } catch { onLog?("inputs: removing the old ones failed: \(error)") }
+            try? await Task.sleep(nanoseconds: 300_000_000)
+        }
         var lastFailure = ""
         for attempt in 1...15 {
             do {
@@ -158,6 +186,11 @@ final class GlassesDisplay: ObservableObject {
                 return true
             } catch {
                 lastFailure = "\(error)"
+                if case DeviceSessionError.capabilityAlreadyActive = error {
+                    needsNewSession = true
+                    lastError = "the session still holds the old inputs"
+                    return false
+                }
                 onLog?("inputs: attempt \(attempt) failed: \(lastFailure)")
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
             }

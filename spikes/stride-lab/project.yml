@@ -15,7 +15,7 @@ settings:
     # Swift 5 language mode: written without a local compiler, so Swift 6's
     # strict concurrency checks would only add build round trips.
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "0.2.0"
+    MARKETING_VERSION: "0.3.0"
     CURRENT_PROJECT_VERSION: "1"
 targets:
   StrideLab:

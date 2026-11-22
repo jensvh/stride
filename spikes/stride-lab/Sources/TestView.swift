@@ -65,6 +65,9 @@ struct ConnectControls: View {
         Text(glasses.deviceInfo).font(.footnote).foregroundStyle(glasses.connected ? .green : .orange)
         LabeledContent("Session", value: glasses.sessionState)
         Button("Register with the Meta AI app") { glasses.register() }
+        Button("Start a new session") {
+            Task { _ = await glasses.newSession() }
+        }
         Button("Open a session") {
             Task {
                 let session = await glasses.ensureSession()
@@ -260,6 +263,16 @@ struct GestureControls: View {
     var body: some View {
         LabeledContent("Glasses inputs", value: display.inputsState)
         LabeledContent("Media buttons", value: audio.running ? "listening" : "off")
+        Button("Start listening with a card on the lens") {
+            display.clearInputs()
+            audio.clearMediaKeys()
+            audio.start { _ in
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                    glasses.startInputs(card: true)
+                }
+            }
+        }
         Button("Start listening") {
             display.clearInputs()
             audio.clearMediaKeys()

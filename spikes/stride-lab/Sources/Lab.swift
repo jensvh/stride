@@ -245,7 +245,7 @@ final class Lab: ObservableObject {
 
         // 7. Gestures
         step("gestures")
-        glasses.startInputs()
+        glasses.startInputs(card: true)
         glasses.display.clearInputs()
         audio.clearMediaKeys()
         await speak("Gesture test. For ten seconds: tap, swipe and pinch.")

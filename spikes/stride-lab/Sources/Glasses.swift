@@ -430,18 +430,39 @@ final class Glasses: ObservableObject {
                 say("display: these glasses report no display")
                 return
             }
-            let ok = await display.show(on: session, title: title, body: body)
+            var ok = await display.show(on: session, title: title, body: body)
+            if !ok, display.needsNewSession, let fresh = await newSession() {
+                ok = await display.show(on: fresh, title: title, body: body)
+            }
             say(ok ? "display: card shown, pick on the lens" : "display: \(display.lastError)")
         }
     }
 
-    func startInputs() {
+    /// card: also show a card on the lens while listening, so this app is the
+    /// one in front on the glasses.
+    func startInputs(card: Bool = false) {
         Task {
             say("inputs: opening…")
-            guard let session = await ensureSession() else { return }
-            let ok = await display.startInputs(on: session)
-            say(ok ? "inputs: listening, tap or pinch now" : "inputs: \(display.lastError)")
+            guard var session = await ensureSession() else { return }
+            var ok = await display.startInputs(on: session)
+            if !ok, display.needsNewSession, let fresh = await newSession() {
+                session = fresh
+                ok = await display.startInputs(on: fresh)
+            }
+            guard ok else { say("inputs: \(display.lastError)"); return }
+            if card {
+                _ = await display.show(on: session, title: "Gesture test", body: "Swipe, tap and pinch. Every gesture shows up on the phone.")
+            }
+            say("inputs: listening\(card ? " with a card on the lens" : ""), tap or pinch now")
         }
+    }
+
+    /// Ends the current session and opens a new one.
+    func newSession() async -> DeviceSession? {
+        onLog?("session: starting over")
+        endSession()
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        return await ensureSession()
     }
 
     // MARK: Permission
