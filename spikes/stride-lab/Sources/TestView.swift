@@ -22,7 +22,7 @@ struct TestView: View {
                 }
             }
             Section("Test") { controls }
-                .disabled(lab.locked)
+                .modifier(WaitWhileBusy())
             if !r.measured.isEmpty {
                 Section("Measured") {
                     ForEach(r.measured, id: \.self) { Text($0).font(.footnote) }
@@ -61,6 +61,18 @@ struct TestView: View {
 }
 
 // MARK: - Status and reset
+
+/// Disables its content while an action runs or the screen-off round is on.
+/// It watches the glasses itself: a view that only watches Lab doesn't redraw
+/// when the action ends, so its buttons stayed grey until you left the test.
+struct WaitWhileBusy: ViewModifier {
+    @EnvironmentObject var glasses: Glasses
+    @EnvironmentObject var lab: Lab
+
+    func body(content: Content) -> some View {
+        content.disabled(glasses.busy != nil || lab.screenOffRunning)
+    }
+}
 
 func color(_ phase: Phase) -> Color {
     switch phase {

@@ -318,12 +318,21 @@ final class Glasses: ObservableObject {
     // MARK: Registration
 
     func register() {
+        guard !registered else {
+            say("Already registered with the Meta AI app. To start over: Settings → Unregister, then Register again.")
+            return
+        }
         run("registering") {
             do {
                 try await self.wearables.startRegistration()
                 self.say("registration started: confirm in the Meta AI app")
             } catch {
-                self.say("registration failed: \(error)")
+                // Meta: "already registered" is a success (ios#307).
+                if self.registered || (error as? RegistrationError) == .alreadyRegistered {
+                    self.say("Already registered with the Meta AI app.")
+                } else {
+                    self.say("registration failed: \(error)")
+                }
             }
         }
     }

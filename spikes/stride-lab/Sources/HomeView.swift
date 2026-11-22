@@ -108,7 +108,7 @@ struct ScreenOffCard: View {
                     Label("Start screen-off round", systemImage: "lock.iphone").frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(lab.locked)
+                .modifier(WaitWhileBusy())
                 Text("It starts by closing everything, asks for permissions with the screen on, and closes everything again at the end.")
                     .font(.footnote).foregroundStyle(.secondary)
             }

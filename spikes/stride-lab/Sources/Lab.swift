@@ -113,9 +113,6 @@ final class Lab: ObservableObject {
         }
     }
 
-    /// Buttons wait while an action runs or the screen-off round is on.
-    var locked: Bool { glasses.busy != nil || screenOffRunning }
-
     // MARK: Sound modes
 
     private func wait(_ seconds: Double) async {
