@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreMedia
 import Foundation
 import MWDATCamera
 import MWDATCore
@@ -35,6 +36,9 @@ final class Glasses: ObservableObject {
     @Published private(set) var micFrames = 0
     @Published private(set) var micLevel: Double = 0
     @Published private(set) var micRate: Double = 0
+    /// HEVC frames are shown on `preview`; raw ones as `frame`.
+    @Published private(set) var previewing = false
+    let preview = FramePreview()
 
     var onLog: ((String) -> Void)?
     let display = GlassesDisplay()
@@ -206,6 +210,7 @@ final class Glasses: ObservableObject {
                 for await state in session.stateStream() {
                     self?.sessionState = String(describing: state)
                     self?.onLog?("session: \(state)")
+                    if state == .stopped { self?.sessionEnded(session) }
                 }
             })
             sessionTasks.append(Task { [weak self] in
@@ -241,6 +246,16 @@ final class Glasses: ObservableObject {
         }
     }
 
+    /// The glasses ended the session (or it failed): its camera, display and
+    /// inputs are gone with it, so the next test opens a fresh one.
+    private func sessionEnded(_ ended: DeviceSession) {
+        guard session === ended else { return }
+        stopCamera()
+        display.stop()
+        session = nil
+        say("The glasses ended the session. The next test opens a new one.")
+    }
+
     func endSession() {
         stopCamera()
         display.stop()
@@ -253,28 +268,31 @@ final class Glasses: ObservableObject {
 
     // MARK: Camera (and the glasses' microphone on the camera stream)
 
-    /// raw: uncompressed frames that can be shown on the phone, but they pause
-    /// when the app leaves the screen. hvc1: compressed, keeps flowing in the
-    /// background; frames are counted, not shown. mic: the glasses' microphone
-    /// as 16 kHz audio on the same stream (needs the toolkit's microphone permission).
-    func startCamera(raw: Bool = true, showFrames: Bool = true, mic: Bool = false) {
+    /// hvc1 (default): compressed video, the only kind that fits the Bluetooth
+    /// link, and it keeps flowing when the app leaves the screen. Shown through
+    /// `preview` (the toolkit can't make a UIImage from it). raw: uncompressed,
+    /// needs the faster Wi-Fi link and pauses off screen. mic: the glasses'
+    /// microphone as 16 kHz audio on the same stream. ask: may open the Meta AI
+    /// app for a permission (not while the phone is locked: it can't show it).
+    func startCamera(raw: Bool = false, showFrames: Bool = true, mic: Bool = false) {
         Task { await startCameraNow(raw: raw, showFrames: showFrames, mic: mic) }
     }
 
     @discardableResult
-    func startCameraNow(raw: Bool = true, showFrames: Bool = true, mic: Bool = false) async -> Bool {
+    func startCameraNow(raw: Bool = false, showFrames: Bool = true, mic: Bool = false,
+                        ask: Bool = true, resolution: StreamingResolution = .medium) async -> Bool {
         say("camera: checking permission…")
-        guard await allowed(.camera) else { return false }
+        guard await allowed(.camera, ask: ask) else { return false }
         var withMic = mic
-        if mic, !(await allowed(.microphone)) { withMic = false }
+        if mic, !(await allowed(.microphone, ask: ask)) { withMic = false }
         guard let session = await ensureSession() else { return false }
         stopCamera()
         self.showFrames = showFrames
         let config = StreamConfiguration(
             videoCodec: raw ? VideoCodec.raw : VideoCodec.hvc1,
             audioCodec: withMic ? .pcm(sampleRate: .rate16000, numberOfChannels: 1) : nil,
-            resolution: StreamingResolution.low,
-            frameRate: raw ? 24 : 15)
+            resolution: resolution,
+            frameRate: 24)
         do {
             guard let camera = try session.addCamera(config: config) else {
                 say("camera: the glasses offer no camera on this session")
@@ -286,6 +304,9 @@ final class Glasses: ObservableObject {
             micFrames = 0
             micLevel = 0
             micMeter.reset()
+            previewing = false
+            frame = nil
+            preview.flush()
             let stream = camera.stream
             cameraTokens.append(stream.statePublisher.listen { [weak self] state in
                 Task { @MainActor in
@@ -298,7 +319,7 @@ final class Glasses: ObservableObject {
             })
             cameraTokens.append(stream.videoFramePublisher.listen { [weak self] frame in
                 let image = raw ? frame.makeUIImage() : nil
-                Task { @MainActor in self?.gotFrame(image) }
+                Task { @MainActor in self?.gotFrame(image, video: raw ? nil : frame) }
             })
             cameraTokens.append(stream.photoDataPublisher.listen { [weak self] photo in
                 let image = UIImage(data: photo.data)
@@ -313,7 +334,7 @@ final class Glasses: ObservableObject {
             }
             cameraState = "starting"
             stream.start()
-            say("camera: starting (\(raw ? "raw" : "hvc1")\(withMic ? " + glasses mic" : ""), waiting for the glasses)")
+            say("camera: starting (\(raw ? "raw" : "hvc1"), \(resolution)\(withMic ? ", glasses mic" : ""); waiting for the glasses)")
             return true
         } catch {
             say("camera failed: \(Self.explain(error))")
@@ -340,14 +361,28 @@ final class Glasses: ObservableObject {
     var cameraStreaming: Bool { cameraState == "streaming" }
     var micPeak: Float { micMeter.peak }
 
-    private func gotFrame(_ image: UIImage?) {
+    private func gotFrame(_ image: UIImage?, video: VideoFrame?) {
         frames += 1
         let now = Date()
         fpsWindow.append(now)
         fpsWindow.removeAll { now.timeIntervalSince($0) > 2 }
         fps = Double(fpsWindow.count) / 2
-        if showFrames, let image { frame = image }
-        if frames == 1 { say("camera: first frame arrived") }
+        if showFrames {
+            if let image { frame = image }
+            else if let video {
+                preview.show(video.sampleBuffer)
+                if !previewing { previewing = true }
+            }
+        }
+        if frames == 1 {
+            var size = ""
+            if let image { size = " (\(Int(image.size.width * image.scale))×\(Int(image.size.height * image.scale)))" }
+            else if let video, let format = CMSampleBufferGetFormatDescription(video.sampleBuffer) {
+                let d = CMVideoFormatDescriptionGetDimensions(format)
+                size = " (\(d.width)×\(d.height))"
+            }
+            say("camera: first frame arrived\(size)")
+        }
     }
 
     private func gotAudio(level: Double, rate: Double) {
@@ -359,10 +394,10 @@ final class Glasses: ObservableObject {
 
     // MARK: Photo
 
-    func takePhoto(raw: Bool = true) {
+    func takePhoto(raw: Bool = false, ask: Bool = true) {
         Task {
             if camera == nil || !cameraStreaming {
-                guard await startCameraNow(raw: raw, showFrames: true) else { return }
+                guard await startCameraNow(raw: raw, showFrames: true, ask: ask) else { return }
                 for _ in 0..<60 where !cameraStreaming {
                     try? await Task.sleep(nanoseconds: 250_000_000)
                 }
@@ -379,6 +414,8 @@ final class Glasses: ObservableObject {
 
     private func gotPhoto(_ image: UIImage?) {
         photo = image
+        // The video layer freezes after a photo unless it is flushed.
+        preview.flush()
         if let asked = photoAskedAt { photoMs = Int(Date().timeIntervalSince(asked) * 1000) }
         say("photo: received\(photoMs.map { " after \($0) ms" } ?? "")\(image == nil ? " but could not decode it" : "")")
     }
@@ -409,9 +446,20 @@ final class Glasses: ObservableObject {
 
     // MARK: Permission
 
-    private func allowed(_ permission: Permission) async -> Bool {
+    /// Asks for the toolkit's camera and microphone permissions while the
+    /// screen is on: the Meta AI app can't ask once the phone is locked.
+    func preparePermissions() async {
+        _ = await allowed(.camera)
+        _ = await allowed(.microphone)
+    }
+
+    private func allowed(_ permission: Permission, ask: Bool = true) async -> Bool {
         do {
             if try await wearables.checkPermissionStatus(permission) == .granted { return true }
+            guard ask else {
+                say("\(permission) permission not granted yet (it can only be asked with the screen on)")
+                return false
+            }
             say("\(permission) permission: asking in the Meta AI app")
             let status = try await wearables.requestPermission(permission)
             if status != .granted { say("\(permission) permission: \(status). Allow it in the Meta AI app → App connections → Stride Lab.") }

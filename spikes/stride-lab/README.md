@@ -54,5 +54,6 @@ The results are saved on the phone (Files → On My iPhone → Stride Lab → `s
 ## Known limits of this first version
 
 - The toolkit's exact Swift API was not available on a Mac while writing; the first CI builds fix any names that differ (the CI job saves the toolkit's interfaces as the `StrideLab-api` artifact).
-- High-resolution video over Wi-Fi needs Apple's Hotspot entitlement, which a free Apple ID can't sign. The camera test uses the low resolution (360×640), which streams over Bluetooth.
+- The camera needs a faster link than the display. The toolkit has two: the glasses' Wi-Fi (needs Apple's Hotspot capability, which a free Apple ID can't sign) and Bluetooth Classic, which it only uses when the app declares the `com.meta.ar.wearable` accessory protocol and the `external-accessory` background mode (Stride Lab does). Without a usable link the camera waits 30 seconds and fails with "not connected". Over Bluetooth the video is compressed (HEVC): the app shows it on a video layer, because the toolkit can't turn those frames into an image.
+- Permissions for the toolkit's camera and microphone are asked in the Meta AI app, which can't show them while the phone is locked. The screen-off round asks for both before you lock the phone.
 - The screen-off round starts with the screen on and keeps going after you lock. If iOS suspends the app, the log shows the gap and the remaining steps fail. That is a finding, not a bug.

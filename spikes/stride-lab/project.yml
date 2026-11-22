@@ -15,7 +15,7 @@ settings:
     # Swift 5 language mode: written without a local compiler, so Swift 6's
     # strict concurrency checks would only add build round trips.
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "0.1.0"
+    MARKETING_VERSION: "0.2.0"
     CURRENT_PROJECT_VERSION: "1"
 targets:
   StrideLab:
@@ -48,7 +48,15 @@ targets:
           - audio
           - bluetooth-central
           - bluetooth-peripheral
+          - external-accessory
           - processing
+        # The camera needs a faster link than the display: the glasses' Wi-Fi
+        # (needs Apple's Hotspot capability, which a free Apple ID can't sign) or
+        # Bluetooth Classic through ExternalAccessory. The toolkit only uses the
+        # Bluetooth link when this protocol and the external-accessory mode are
+        # declared; without them the camera waits 30 s and fails "not connected".
+        UISupportedExternalAccessoryProtocols:
+          - com.meta.ar.wearable
         NSMicrophoneUsageDescription: Stride Lab tests the microphone of your glasses.
         NSBluetoothAlwaysUsageDescription: Needed to connect to your Meta glasses.
         NSBluetoothPeripheralUsageDescription: Needed to connect to your Meta glasses.

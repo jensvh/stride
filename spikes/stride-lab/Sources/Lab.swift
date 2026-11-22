@@ -138,6 +138,9 @@ final class Lab: ObservableObject {
 
     private func runScreenOff() async {
         let round = Round.screenOff
+        // The Meta AI app can only ask for permissions with the screen on.
+        step("permissions")
+        await glasses.preparePermissions()
         let ok = await withCheckedContinuation { c in audio.start { c.resume(returning: $0) } }
         guard ok else { step("audio could not start"); return }
 
@@ -210,7 +213,7 @@ final class Lab: ObservableObject {
         // a raw stream pauses as soon as the app is off the screen.
         step("camera")
         await speak("Camera test. Look around, and keep talking, for eight seconds.")
-        await glasses.startCameraNow(raw: false, showFrames: false, mic: true)
+        await glasses.startCameraNow(raw: false, showFrames: false, mic: true, ask: false, resolution: .low)
         for _ in 0..<40 where !glasses.cameraStreaming { await wait(0.25) }
         await wait(8)
         let frames = glasses.frames
@@ -229,7 +232,7 @@ final class Lab: ObservableObject {
         step("photo")
         await speak("Photo test. Hold still.")
         let before = glasses.photo
-        glasses.takePhoto(raw: false)
+        glasses.takePhoto(raw: false, ask: false)
         var gotPhoto = false
         for _ in 0..<100 {
             if glasses.photo !== before, glasses.photo != nil { gotPhoto = true; break }

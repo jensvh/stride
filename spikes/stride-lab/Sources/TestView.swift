@@ -190,11 +190,15 @@ struct CameraControls: View {
     var body: some View {
         LabeledContent("Camera", value: glasses.cameraState)
         LabeledContent("Frames", value: "\(glasses.frames) · \(String(format: "%.0f", glasses.fps)) fps")
-        if let frame = glasses.frame {
+        if glasses.previewing {
+            FramePreviewView(preview: glasses.preview).frame(height: 320).clipShape(RoundedRectangle(cornerRadius: 10))
+        } else if let frame = glasses.frame {
             Image(uiImage: frame).resizable().scaledToFit().frame(maxHeight: 320).clipShape(RoundedRectangle(cornerRadius: 10))
         }
         if glasses.cameraState == "off" {
             Button("Start") { glasses.startCamera() }
+            Button("Start uncompressed (needs Wi-Fi link)") { glasses.startCamera(raw: true) }
+                .font(.footnote)
         } else {
             Button("Stop", role: .destructive) {
                 results.measure(.camera, .screenOn, "\(glasses.frames) frames, about \(String(format: "%.0f", glasses.fps)) fps")
@@ -259,8 +263,14 @@ struct GestureControls: View {
         Button("Start listening") {
             display.clearInputs()
             audio.clearMediaKeys()
-            audio.start()
-            glasses.startInputs()
+            // Audio first: switching the glasses to the headset profile can
+            // briefly end a toolkit session, so the inputs attach after it.
+            audio.start { _ in
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                    glasses.startInputs()
+                }
+            }
         }
         GlassesStatus()
         if !display.inputs.isEmpty {
