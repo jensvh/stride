@@ -51,11 +51,37 @@ It reads `STT_URL` and `STT_API_KEY` from `bridge/.env` and writes `build-out\St
 
 The results are saved on the phone (Files → On My iPhone → Stride Lab → `stride-lab-results.json`), next to the full log `stride-lab.log`.
 
+## Rules of the glasses
+
+Found while testing and confirmed on Meta's developer forum. Stride Lab follows them; any app for these glasses has to.
+
+| Rule | What Stride Lab does | Source |
+|---|---|---|
+| Bringing up the Bluetooth headset microphone (HFP) while a toolkit session is open ends the session or leaves the microphone silent. A glasses software bug, fixed in glasses release 130. | The headset microphone only changes with no session open: switching closes the session first, waits 2 s, then switches. | [ios#342](https://github.com/meta/meta-wearables-dat-ios/issues/342) |
+| After the headset link is dropped and re-made a few times, the glasses can refuse sessions and streams until they are switched off and on. | The headset microphone stays on for 2 minutes after use instead of going on and off. After two refusals in a row the app asks you to restart the glasses. | [ios#375](https://github.com/meta/meta-wearables-dat-ios/issues/375) |
+| The back gesture closes the app on the glasses; apps can't catch it on real glasses. Only a new session brings a card back. | Every card has a Close button. Show card reopens on a new session when the last card is more than 10 s old. | [ios#349](https://github.com/meta/meta-wearables-dat-ios/issues/349) |
+| While a camera stream runs, the glasses mute app sound; it may not come back afterwards. | Speech closes the camera first; round 2 puts the camera last and asks whether you can still hear it. | [ios#358](https://github.com/meta/meta-wearables-dat-ios/issues/358), [#256](https://github.com/meta/meta-wearables-dat-ios/issues/256) |
+| One tap on the glasses pauses a session, a second tap resumes, tap-and-hold stops it. | Shows "paused", never restarts while paused, closes the session after 30 s paused. | [ios#312](https://github.com/meta/meta-wearables-dat-ios/issues/312) |
+| Keep one session; between uses stop the camera and add it again. Don't restart a stopped stream. Leave at least 2 s between sessions. | One shared session, `camera.stop()` and a fresh camera each time, 2 s gap, one retry. | [ios#292](https://github.com/meta/meta-wearables-dat-ios/issues/292), [#260](https://github.com/meta/meta-wearables-dat-ios/issues/260) |
+| The white LED is on while the camera streams. If it stays on after stopping, or after the app was killed mid-stream, the glasses still hold the camera. | Every stop is confirmed; an unconfirmed stop closes the session. After a kill, the next launch tells you to tap Stop in Meta AI or restart the glasses. | [ios#318](https://github.com/meta/meta-wearables-dat-ios/issues/318), [#231](https://github.com/meta/meta-wearables-dat-ios/issues/231) |
+| Asking for every gesture takes the Neural Band away from a card's buttons. | Two gesture modes: everything to the phone, or frame gestures only with the band left to the card. | Meta's BirdSpotter sample |
+
+## When something gets stuck
+
+Every screen shows what is open (registration, glasses, session, camera, card, gestures, headset microphone) and has a **Reset** menu:
+
+- **Stop everything**: closes the camera, card, gestures, session and headset microphone. Keeps the registration.
+- **Reset glasses connection**: stop everything, wait, open a new session to prove it works.
+- **Reset audio**: closes the session, releases the headset microphone; it comes back when a test needs it.
+- **Full reset**: all of the above, and clears the lists on screen.
+
+If the glasses keep refusing (the app says so), switch them off and on with the power switch, then use Reset glasses connection.
+
+Leaving a test stops what it started. Locking the phone closes nothing. Swiping the app away releases the camera, card, gestures, session and headset microphone, so the glasses and other apps are free again.
+
 ## Known limits of this first version
 
 - The toolkit's exact Swift API was not available on a Mac while writing; the first CI builds fix any names that differ (the CI job saves the toolkit's interfaces as the `StrideLab-api` artifact).
 - The camera needs a faster link than the display. The toolkit has two: the glasses' Wi-Fi (needs Apple's Hotspot capability, which a free Apple ID can't sign) and Bluetooth Classic, which it only uses when the app declares the `com.meta.ar.wearable` accessory protocol and the `external-accessory` background mode (Stride Lab does). Without a usable link the camera waits 30 seconds and fails with "not connected". Over Bluetooth the video is compressed (HEVC): the app shows it on a video layer, because the toolkit can't turn those frames into an image.
-- Switching the glasses to the Bluetooth headset profile (when the iPhone starts using their microphone) ends a running toolkit session. Start the microphone first, then the camera, display or inputs.
-- A display can report "started" while the lens shows Meta's home screen (after you leave the app on the glasses). Stride Lab restarts the display for every card, and starts a new session if the old one won't let go.
 - Permissions for the toolkit's camera and microphone are asked in the Meta AI app, which can't show them while the phone is locked. The screen-off round asks for both before you lock the phone.
 - The screen-off round starts with the screen on and keeps going after you lock. If iOS suspends the app, the log shows the gap and the remaining steps fail. That is a finding, not a bug.

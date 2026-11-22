@@ -7,43 +7,61 @@ import MWDATInputs
 
 /// Custom UI on the lens (MWDATDisplay) and glasses inputs (MWDATInputs).
 ///
-/// Neither capability waits for the glasses the way the camera does: asked for
-/// while the glasses are still arriving, they fail once and never retry. So both
-/// are attached with patience: asked again every second for up to 15 seconds.
+/// - Neither waits for the glasses the way the camera does: asked for while
+///   the glasses are still arriving, they fail once. Both are retried.
+/// - Every card has a Close button: on real glasses the back gesture closes
+///   the app on the glasses instead of reaching the app (Meta, ios#349).
+/// - Closing is confirmed: clear, stop, wait for stopped; inputs are removed.
+/// - Each instance has a generation number; callbacks from an older one are
+///   ignored.
 @MainActor
 final class GlassesDisplay: ObservableObject {
-    @Published private(set) var state = "off"
+    @Published private(set) var phase: Phase = .off { didSet { if phase != oldValue { resourcesChanged?() } } }
+    @Published private(set) var inputsPhase: Phase = .off { didSet { if inputsPhase != oldValue { resourcesChanged?() } } }
     @Published private(set) var choices: [String] = []
     @Published private(set) var inputs: [String] = []
-    @Published private(set) var inputsState = "off"
+    @Published private(set) var drags = 0
     @Published private(set) var sendMs: Int?
     private(set) var lastError = ""
     /// Set when the session refuses a new display or inputs (already active):
     /// only a new session can bring them back.
     private(set) var needsNewSession = false
+    private(set) var lastCardAt: Date?
+    /// A card was shown in this session (it may have been closed on the
+    /// glasses since, which the toolkit doesn't report).
+    private(set) var usedInSession = false
 
     var onLog: ((String) -> Void)?
     var onChoice: ((String) -> Void)?
+    var onClosePressed: (() -> Void)?
+    var resourcesChanged: (() -> Void)?
 
     private var display: Display?
+    private var displayGen = 0
+    private var displayTokens: [any AnyListenerToken] = []
+    private var closingDisplay = false
+
     private var inputsCapability: Inputs?
-    private var tokens: [any AnyListenerToken] = []
-    private var inputsTask: Task<Void, Never>?
+    private var inputsGen = 0
+    private var inputsTokens: [any AnyListenerToken] = []
+    private var inputsReader: Task<Void, Never>?
+    private var inputsWereActive = false
+
+    var isOpen: Bool { display != nil }
+    var inputsOpen: Bool { inputsCapability != nil }
 
     // MARK: Display
 
-    /// Shows a card with Yes/No buttons. Returns false (with lastError) if the
-    /// display could not be reached.
-    ///
-    /// fresh: restart the display first. A display can report "started" while
-    /// the lens shows Meta's home screen (after you leave the app on the
-    /// glasses); starting it again is what puts this app back on the lens.
-    func show(on session: DeviceSession, title: String, body: String, fresh: Bool = true) async -> Bool {
-        guard let display = await attachDisplay(to: session, fresh: fresh) else { return false }
+    /// Shows a card with Yes, No and Close. fresh: restart the display first
+    /// (a display can report "started" while the lens shows Meta's home).
+    func show(on session: DeviceSession, title: String, body: String, fresh: Bool) async -> Bool {
+        guard let target = await attachDisplay(to: session, fresh: fresh) else { return false }
         do {
             let started = Date()
-            try await display.send(card(title: title, body: body))
+            try await target.send(card(title: title, body: body))
             sendMs = Int(Date().timeIntervalSince(started) * 1000)
+            lastCardAt = Date()
+            usedInSession = true
             onLog?("display: card sent in \(sendMs ?? 0) ms")
             return true
         } catch {
@@ -55,52 +73,61 @@ final class GlassesDisplay: ObservableObject {
 
     private func attachDisplay(to session: DeviceSession, fresh: Bool) async -> Display? {
         needsNewSession = false
-        if let display, display.state == .started, !fresh { return display }
-        if let display {
+        if let current = display, current.state == .started, !fresh { return current }
+        if display != nil {
             onLog?("display: restarting it")
-            display.stop()
-            for _ in 0..<20 where display.state != .stopped {
-                try? await Task.sleep(nanoseconds: 100_000_000)
-            }
-            self.display = nil
+            await closeDisplay(clear: false)
         }
+        phase = .starting
         var lastFailure = ""
-        for attempt in 1...15 {
+        for attempt in 1...10 {
+            if Task.isCancelled { break }
             do {
                 let capability = try session.addDisplay()
-                tokens.append(capability.statePublisher.listen { [weak self] state in
-                    Task { @MainActor in
-                        self?.state = String(describing: state)
-                        self?.onLog?("display: \(state)")
-                    }
-                })
+                displayGen += 1
+                let gen = displayGen
                 display = capability
+                displayTokens.append(capability.statePublisher.listen { [weak self] state in
+                    Task { @MainActor in self?.displayStateChanged(state, gen: gen) }
+                })
                 capability.start()
-                for _ in 0..<40 where capability.state != .started {
-                    try? await Task.sleep(nanoseconds: 125_000_000)
-                }
-                state = String(describing: capability.state)
-                if capability.state == .started {
+                _ = await waitUntil(5, step: 0.1) { capability.state == .started }
+                if capability.state == .started, displayGen == gen {
+                    phase = .on
                     onLog?("display: started (attempt \(attempt))")
                     return capability
                 }
                 lastFailure = "the display did not start (\(capability.state))"
-                capability.stop()
-                display = nil
+                await closeDisplay(clear: false)
+                phase = .starting
             } catch {
                 lastFailure = "\(error)"
-                if case DeviceSessionError.capabilityAlreadyActive = error {
+                if (error as? DeviceSessionError) == .capabilityAlreadyActive {
                     needsNewSession = true
                     lastError = "the session still holds the old display"
+                    phase = .failed(lastError)
                     onLog?("display: \(lastError), a new session is needed")
                     return nil
                 }
             }
             onLog?("display: attempt \(attempt) failed: \(lastFailure)")
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            try? await Task.sleep(nanoseconds: 750_000_000)
         }
         lastError = "could not open the display: \(lastFailure)"
+        phase = .failed(lastFailure)
         return nil
+    }
+
+    private func displayStateChanged(_ state: DisplayState, gen: Int) {
+        guard gen == displayGen else { return }
+        onLog?("display: \(state)")
+        if state == .stopped, !closingDisplay, display != nil {
+            // Stopped by the glasses: let go of it.
+            displayGen += 1
+            display = nil
+            cancel(&displayTokens)
+            phase = .off
+        }
     }
 
     private func card(title: String, body: String) -> FlexBox {
@@ -114,90 +141,132 @@ final class GlassesDisplay: ObservableObject {
                 Button(label: "No", style: .secondary, onClick: { [weak self] in
                     Task { @MainActor in self?.chose("No") }
                 })
+                // Instead of the back gesture, which closes the app on the glasses.
+                Button(label: "Close", style: .outline, onClick: { [weak self] in
+                    Task { @MainActor in
+                        self?.onLog?("display: Close picked on the lens")
+                        self?.onClosePressed?()
+                    }
+                })
             }
         }
     }
 
     private func chose(_ choice: String) {
         choices.append(choice)
+        if choices.count > 30 { choices.removeFirst() }
         onLog?("display: you picked \(choice) on the lens")
         onChoice?(choice)
     }
 
-    func clear() {
-        choices = []
-        guard let display else { return }
-        Task { [weak self] in
-            do { try await display.clearDisplay() } catch { self?.onLog?("display clear failed: \(error)") }
+    /// Clears the lens, stops the display and waits until it has stopped.
+    func closeDisplay(clear: Bool = true) async {
+        guard let closing = display else {
+            if phase != .off && phase != .starting { phase = .off }
+            return
         }
-    }
-
-    func stop() {
-        display?.stop()
+        closingDisplay = true
+        defer { closingDisplay = false }
+        displayGen += 1
         display = nil
-        let old = tokens
-        tokens = []
-        Task { for token in old { await token.cancel() } }
-        state = "off"
-        stopInputs()
+        phase = .stopping
+        if clear {
+            _ = await finishes(within: 2) { _ = try? await closing.clearDisplay() }
+        }
+        closing.stop()
+        _ = await waitUntil(2, step: 0.1) { closing.state == .stopped }
+        let tokens = displayTokens
+        displayTokens = []
+        for token in tokens { await token.cancel() }
+        lastCardAt = nil
+        phase = .off
     }
 
-    // MARK: Inputs (touchpad, Neural Band, buttons)
+    func clearChoices() { choices = [] }
 
-    /// Returns false (with lastError) if the inputs could not be attached.
-    /// Always starts fresh: a tap on Start listening replaces the old listener
-    /// (it may belong to a session the glasses ended).
-    func startInputs(on session: DeviceSession) async -> Bool {
+    // MARK: Inputs (frame, Neural Band, buttons)
+
+    /// Starts listening with the given sources; always fresh (an old listener
+    /// is removed first). Asking for the Neural Band takes it away from the
+    /// card's buttons (Meta's BirdSpotter sample).
+    func openInputs(on session: DeviceSession, sources: Set<InputSource>) async -> Bool {
         needsNewSession = false
-        if inputsCapability != nil {
-            stopInputs()
-            do { try session.removeInputs() } catch { onLog?("inputs: removing the old ones failed: \(error)") }
-            try? await Task.sleep(nanoseconds: 300_000_000)
-        }
+        await closeInputs(on: session)
+        inputsPhase = .starting
         var lastFailure = ""
-        for attempt in 1...15 {
+        for attempt in 1...10 {
+            if Task.isCancelled { break }
             do {
-                guard let capability = try session.addInputs() else {
+                let configuration = InputsConfiguration(sources: sources, consumeBack: true)
+                guard let capability = try session.addInputs(configuration: configuration) else {
                     lastError = "these glasses offer no inputs to the toolkit"
-                    inputsState = "not available"
+                    inputsPhase = .failed(lastError)
                     return false
                 }
+                inputsGen += 1
+                let gen = inputsGen
                 inputsCapability = capability
-                inputsState = "listening"
-                onLog?("inputs: listening (attempt \(attempt)), sources \(capability.configuration.sources.map { "\($0)" }.sorted().joined(separator: ", "))")
-                tokens.append(capability.statePublisher.listen { [weak self] state in
+                inputsWereActive = false
+                inputsTokens.append(capability.statePublisher.listen { [weak self] state in
+                    Task { @MainActor in self?.inputsStateChanged(state, gen: gen) }
+                })
+                inputsTokens.append(capability.errorPublisher.listen { [weak self] error in
                     Task { @MainActor in
-                        self?.inputsState = String(describing: state)
-                        self?.onLog?("inputs: \(state)")
+                        guard let self, gen == self.inputsGen else { return }
+                        self.onLog?("inputs error: \(error)")
                     }
                 })
-                tokens.append(capability.errorPublisher.listen { [weak self] error in
-                    Task { @MainActor in self?.onLog?("inputs error: \(error)") }
-                })
-                inputsTask = Task { [weak self] in
+                inputsReader = Task { [weak self] in
                     for await event in capability.events {
-                        let text = Self.describe(event)
-                        self?.inputs.append(text)
-                        if (self?.inputs.count ?? 0) > 50 { self?.inputs.removeFirst() }
-                        self?.onLog?("input: \(text)")
+                        guard let self, gen == self.inputsGen else { return }
+                        self.received(event)
                     }
-                    self?.inputsState = "ended"
                 }
+                _ = await waitUntil(3, step: 0.1) { capability.state == .active }
+                inputsPhase = .on
+                onLog?("inputs: listening (attempt \(attempt)), sources \(sources.map { "\($0)" }.sorted().joined(separator: ", "))")
                 return true
             } catch {
                 lastFailure = "\(error)"
-                if case DeviceSessionError.capabilityAlreadyActive = error {
+                if (error as? DeviceSessionError) == .capabilityAlreadyActive {
                     needsNewSession = true
                     lastError = "the session still holds the old inputs"
+                    inputsPhase = .failed(lastError)
                     return false
                 }
                 onLog?("inputs: attempt \(attempt) failed: \(lastFailure)")
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                try? await Task.sleep(nanoseconds: 750_000_000)
             }
         }
         lastError = "could not attach the inputs: \(lastFailure)"
-        inputsState = "failed"
+        inputsPhase = .failed(lastFailure)
         return false
+    }
+
+    private func inputsStateChanged(_ state: InputsState, gen: Int) {
+        guard gen == inputsGen else { return }
+        onLog?("inputs: \(state)")
+        switch state {
+        case .active:
+            inputsWereActive = true
+            inputsPhase = .on
+        case .inactive where inputsWereActive:
+            inputsPhase = .failed("stopped by the glasses")
+        default:
+            break
+        }
+    }
+
+    private func received(_ event: InputEvent) {
+        if case .drag = event {
+            drags += 1
+            if drags == 1 || drags % 25 == 0 { onLog?("input: \(drags) drag events so far") }
+            return
+        }
+        let text = Self.describe(event)
+        inputs.append(text)
+        if inputs.count > 50 { inputs.removeFirst() }
+        onLog?("input: \(text)")
     }
 
     private static func describe(_ event: InputEvent) -> String {
@@ -207,16 +276,63 @@ final class GlassesDisplay: ObservableObject {
         case .back(let source, _): return "back (\(source))"
         case .button(let type, let source, _): return "button \(type) (\(source))"
         case .capture(let type, let source, _): return "capture \(type) (\(source))"
-        default: return "\(event)"
+        case .drag(let action, _, _, _, _, let source, _): return "drag \(action) (\(source))"
         }
     }
 
-    func stopInputs() {
-        inputsTask?.cancel()
-        inputsTask = nil
+    /// Stops listening: the reader and tokens first, then removeInputs()
+    /// (the only way to switch inputs off).
+    func closeInputs(on session: DeviceSession) async {
+        guard inputsCapability != nil else {
+            if inputsPhase != .off && inputsPhase != .starting { inputsPhase = .off }
+            return
+        }
+        inputsGen += 1
+        inputsReader?.cancel()
+        inputsReader = nil
         inputsCapability = nil
-        if inputsState != "off" { inputsState = "off" }
+        inputsPhase = .stopping
+        let tokens = inputsTokens
+        inputsTokens = []
+        for token in tokens { await token.cancel() }
+        do { try session.removeInputs() } catch { onLog?("inputs: removing them failed: \(error)") }
+        inputsPhase = .off
     }
 
-    func clearInputs() { inputs = [] }
+    func clearInputs() {
+        inputs = []
+        drags = 0
+    }
+
+    // MARK: Session gone, app closing
+
+    /// The session ended: everything on it is gone.
+    func dropAll() {
+        displayGen += 1
+        inputsGen += 1
+        display = nil
+        inputsReader?.cancel()
+        inputsReader = nil
+        inputsCapability = nil
+        cancel(&displayTokens)
+        cancel(&inputsTokens)
+        lastCardAt = nil
+        usedInSession = false
+        if phase != .off { phase = .off }
+        if inputsPhase != .off { inputsPhase = .off }
+    }
+
+    /// The app is closing: no time to wait for answers.
+    func shutdownNow(on session: DeviceSession) {
+        inputsReader?.cancel()
+        if inputsCapability != nil { try? session.removeInputs() }
+        display?.stop()
+        dropAll()
+    }
+
+    private func cancel(_ tokens: inout [any AnyListenerToken]) {
+        let old = tokens
+        tokens = []
+        Task { for token in old { await token.cancel() } }
+    }
 }

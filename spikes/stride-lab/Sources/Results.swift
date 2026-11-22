@@ -50,9 +50,10 @@ enum TestID: String, Codable, CaseIterable, Identifiable {
             ]
         case .mic:
             return [
-                "Tap Start. The phone switches its microphone to the glasses (Bluetooth headset).",
+                "Tap Start. The phone switches its microphone to the glasses (Bluetooth headset). If a glasses session is open, it is closed first: the headset link would end it.",
                 "Check that “input” names your glasses, not “iPhone Microphone”.",
-                "Talk normally: the level bar should move. Stay quiet: it should drop.",
+                "Talk normally: the level bar should move. Stay quiet: it should drop. Tap Save.",
+                "Then try the second route: Start (toolkit) takes the microphone from the camera stream. It turns the headset microphone off first.",
                 "Mark whether the glasses' microphone works.",
             ]
         case .stt:
@@ -64,7 +65,7 @@ enum TestID: String, Codable, CaseIterable, Identifiable {
             ]
         case .speech:
             return [
-                "Tap Speak. You should hear a sentence in the glasses, not from the phone.",
+                "Tap Speak. You should hear a sentence in the glasses, not from the phone. A running camera is closed first: the glasses mute app sound while it runs.",
                 "Tap Beep for a short tone.",
                 "Mark whether both came out of the glasses and were easy to understand.",
             ]
@@ -72,8 +73,8 @@ enum TestID: String, Codable, CaseIterable, Identifiable {
             return [
                 "Connect the glasses first (test 1).",
                 "Tap Start. The Meta AI app may ask to allow the camera once: allow it and come back.",
-                "Look around: the picture below should follow your head.",
-                "Note the frame rate, then tap Stop.",
+                "Look around: the picture below should follow your head. The white LED on the glasses is on while the camera runs.",
+                "Note the frame rate, then tap Stop once: the LED goes off.",
             ]
         case .photo:
             return [
@@ -84,16 +85,16 @@ enum TestID: String, Codable, CaseIterable, Identifiable {
         case .display:
             return [
                 "Connect the glasses first (test 1).",
-                "Tap Show. A Stride Lab card with two buttons appears on the lens.",
-                "Use the Neural Band (or the touchpad) to pick “Yes” or “No” on the lens.",
-                "The phone counts each choice. Tap Clear when done.",
+                "Tap Show card. A Stride Lab card with Yes, No and Close appears on the lens.",
+                "Use the Neural Band to pick Yes or No. The phone counts each choice.",
+                "Close the card with its Close button. The back gesture closes the whole app on the glasses; if you used it, tap Show card again (it reopens on a new session, about 3 s).",
             ]
         case .gestures:
             return [
-                "Tap Start. The app listens for glasses inputs and for media buttons.",
-                "Try: tap and double tap on the side of the frame, swipe forward and back.",
-                "With the Neural Band: pinch, double pinch, swipe left/right with the thumb, pinch and turn.",
-                "Each gesture that reaches the app is listed below. Mark which ones arrived.",
+                "“All gestures” sends every gesture to the phone, the Neural Band included.",
+                "“With a card” sends only the frame's gestures to the phone and leaves the Neural Band to the card on the lens.",
+                "Try: tap and swipe on the side of the frame; with the Neural Band: pinch, swipe, pinch and drag.",
+                "Each gesture that reaches the app is listed below. Media buttons only arrive while the headset microphone is on. Tap Stop when done.",
             ]
         }
     }
@@ -151,8 +152,9 @@ final class ResultStore: ObservableObject {
 
     func measure(_ test: TestID, _ round: Round, _ line: String) {
         var r = result(test, round)
+        guard r.measured.last != line else { return }
         r.measured.append(line)
-        if r.measured.count > 12 { r.measured.removeFirst(r.measured.count - 12) }
+        if r.measured.count > 8 { r.measured.removeFirst(r.measured.count - 8) }
         r.at = Date()
         results[key(test, round)] = r
         save()

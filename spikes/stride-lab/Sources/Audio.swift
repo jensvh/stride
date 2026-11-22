@@ -5,8 +5,12 @@ import UIKit
 /// Microphone, speech and sound through the glasses' Bluetooth headset link.
 /// One engine serves every test: the level meter, 16 kHz PCM for the STT
 /// server, spoken text, beeps, and media buttons (taps on the glasses).
+///
+/// `running` means the headset link (HFP) is up. It is never switched on as a
+/// side effect: on these glasses, bringing it up while a toolkit session is
+/// open ends that session (Meta, ios#342). Lab decides when it changes.
 final class Audio: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
-    @Published private(set) var running = false
+    @Published private(set) var running = false { didSet { if running != oldValue { onRunningChanged?() } } }
     @Published private(set) var level: Double = 0
     @Published private(set) var input = "—"
     @Published private(set) var output = "—"
@@ -18,6 +22,9 @@ final class Audio: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     /// Called on the audio thread with 16 kHz, 16-bit mono PCM.
     var onPCM: ((Data) -> Void)?
     var onLog: ((String) -> Void)?
+    var onRunningChanged: (() -> Void)?
+    /// Last time a test used the microphone or the speaker.
+    private(set) var lastUsed = Date()
 
     private let session = AVAudioSession.sharedInstance()
     private var engine = AVAudioEngine()
@@ -57,6 +64,25 @@ final class Audio: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
                 _ = self?.startEngine()
             }
         }
+        // The audio system restarted (rare): rebuild everything.
+        NotificationCenter.default.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: .main) { [weak self] _ in
+            guard let self else { return }
+            self.onLog?("the iPhone's audio system restarted")
+            if self.running {
+                self.running = false
+                self.onLog?(self.begin() ? "audio rebuilt" : "audio could not be rebuilt: tap Reset → Reset audio")
+            }
+        }
+    }
+
+    func touch() { lastUsed = Date() }
+
+    var idleSeconds: Double { Date().timeIntervalSince(lastUsed) }
+
+    func startAsync() async -> Bool {
+        await withCheckedContinuation { (done: CheckedContinuation<Bool, Never>) in
+            start { done.resume(returning: $0) }
+        }
     }
 
     // MARK: Start and stop
@@ -89,8 +115,13 @@ final class Audio: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
             try? session.setPreferredInput(glasses)
         }
         refreshRoute()
-        guard startEngine() else { return false }
+        guard startEngine() else {
+            try? session.setActive(false, options: .notifyOthersOnDeactivation)
+            return false
+        }
         setUpMediaKeys()
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = [MPMediaItemPropertyTitle: "Stride Lab", MPMediaItemPropertyArtist: "Testing"]
+        touch()
         running = true
         onLog?("audio on: in \(input), out \(output), \(Int(sampleRate)) Hz")
         return true
@@ -100,11 +131,19 @@ final class Audio: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         guard running else { return }
         running = false
         synth.stopSpeaking(at: .immediate)
+        speaking = false
+        player.stop()
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
-        try? session.setActive(false, options: .notifyOthersOnDeactivation)
+        // Give the glasses' media buttons and sound back to other apps.
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+        do {
+            try session.setActive(false, options: .notifyOthersOnDeactivation)
+        } catch {
+            onLog?("audio: releasing the audio session failed: \(error.localizedDescription)")
+        }
         level = 0
-        onLog?("audio off")
+        onLog?("audio off (headset link released)")
     }
 
     /// A fresh engine each time: after a route change an old one can keep the
@@ -197,20 +236,44 @@ final class Audio: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 
     // MARK: Speech and tones
 
+    /// Speaks through the current output. Doesn't switch the headset link on
+    /// by itself (see the note on `running`).
     func say(_ text: String) {
-        if !running { start { [weak self] ok in if ok { self?.say(text) } }; return }
+        guard running else {
+            onLog?("speech skipped: the sound is off")
+            return
+        }
+        touch()
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
         speaking = true
         synth.speak(utterance)
     }
 
+    func stopSpeaking() {
+        synth.stopSpeaking(at: .immediate)
+        speaking = false
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {
+        let words = String(utterance.speechString.prefix(40))
+        DispatchQueue.main.async { self.onLog?("speaking through \(self.output): “\(words)…”") }
+    }
+
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
         DispatchQueue.main.async { self.speaking = false }
     }
 
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+        DispatchQueue.main.async {
+            self.speaking = false
+            self.onLog?("speech cancelled")
+        }
+    }
+
     func beep(_ frequency: Double = 880, seconds: Double = 0.15) {
-        if !running { start { [weak self] ok in if ok { self?.beep(frequency, seconds: seconds) } }; return }
+        guard running else { return }
+        touch()
         guard engine.isRunning else { return }
         let frames = AVAudioFrameCount(toneFormat.sampleRate * seconds)
         guard let buffer = AVAudioPCMBuffer(pcmFormat: toneFormat, frameCapacity: frames),
@@ -269,7 +332,6 @@ final class Audio: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
                 return .success
             }
         }
-        MPNowPlayingInfoCenter.default().nowPlayingInfo = [MPMediaItemPropertyTitle: "Stride Lab", MPMediaItemPropertyArtist: "Testing"]
     }
 
     func clearMediaKeys() { mediaKeys = [] }

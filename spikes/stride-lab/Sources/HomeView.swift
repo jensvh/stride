@@ -14,8 +14,9 @@ struct HomeView: View {
         NavigationStack {
             List {
                 Section {
-                    Text("Find out what the glasses can do with this iPhone. Work through round 1 from top to bottom with the phone in your hand. Then start round 2, lock the phone and follow the voice in your glasses.")
+                    Text("Find out what the glasses can do with this iPhone. Work through round 1 from top to bottom with the phone in your hand. Then start round 2, lock the phone and follow the voice in your glasses. If anything gets stuck: Reset, top right.")
                         .font(.callout).foregroundStyle(.secondary)
+                    StatusStrip()
                 }
                 Section("Round 1 · screen on") {
                     ForEach(Array(TestID.allCases.enumerated()), id: \.element) { index, test in
@@ -56,6 +57,7 @@ struct HomeView: View {
             }
             .navigationTitle("Stride Lab")
             .toolbar {
+                ResetMenu()
                 Button { showSettings = true } label: { Image(systemName: "gearshape") }
             }
             .sheet(isPresented: $showSettings) { SettingsView() }
@@ -92,7 +94,7 @@ struct ScreenOffCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Do round 1 first. Then tap Start, lock the phone and put it in your pocket. The glasses tell you what to do: talk, listen, pick Yes or No on the lens, look around, tap and pinch. It takes about three minutes. Unlock the phone afterwards to see what worked.")
+            Text("Do round 1 first. Then tap Start, lock the phone and put it in your pocket. The glasses tell you what to do: talk, listen, pick Yes or No on the lens, tap and pinch, look around. The camera comes last, because the glasses mute the voice while it runs. It takes about four minutes. Unlock the phone afterwards to see what worked.")
                 .font(.callout).foregroundStyle(.secondary)
             if lab.screenOffRunning {
                 HStack {
@@ -104,7 +106,11 @@ struct ScreenOffCard: View {
             } else {
                 Button { lab.startScreenOffRound() } label: {
                     Label("Start screen-off round", systemImage: "lock.iphone").frame(maxWidth: .infinity)
-                }.buttonStyle(.borderedProminent)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(lab.locked)
+                Text("It starts by closing everything, asks for permissions with the screen on, and closes everything again at the end.")
+                    .font(.footnote).foregroundStyle(.secondary)
             }
         }.padding(.vertical, 4)
     }
