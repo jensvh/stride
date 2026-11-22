@@ -12,6 +12,19 @@ final class LabSettings: ObservableObject {
     init() {
         sttURL = UserDefaults.standard.string(forKey: "sttURL") ?? ""
         hasKey = Keychain.read("sttKey") != nil
+        loadBundledConfig()
+    }
+
+    /// STTConfig.plist, added to the .ipa on the PC by configure-ipa.ps1 (never
+    /// in the repo or the CI build). It only fills in what is still empty, so a
+    /// change in Settings or from a QR code wins.
+    private func loadBundledConfig() {
+        guard let file = Bundle.main.url(forResource: "STTConfig", withExtension: "plist"),
+              let data = try? Data(contentsOf: file),
+              let config = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: String]
+        else { return }
+        if sttURL.isEmpty, let url = config["STTURL"], !url.isEmpty { sttURL = url }
+        if !hasKey, let key = config["STTKey"], !key.isEmpty { setKey(key) }
     }
 
     var sttKey: String? { Keychain.read("sttKey") }

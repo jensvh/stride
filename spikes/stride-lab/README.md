@@ -27,14 +27,24 @@ Round 2 (screen off) runs tests 2–8 in about three minutes. You lock the phone
 GitHub Actions builds an unsigned `StrideLab.ipa` on every push that touches `spikes/stride-lab/`:
 
 ```powershell
-gh run download --repo jensvh/stride --name StrideLab --dir .
+gh run download --repo jensvh/stride --name StrideLab --dir spikes\stride-lab\build-out
 ```
 
 An unsigned app has to be signed with your Apple ID before iOS installs it. Without a Mac that means a signing tool on Windows (Sideloadly, AltStore or Impactor), or a paid Apple developer account and TestFlight. With a free Apple ID the app works for 7 days, then needs signing again.
 
+### Put your STT server in the app before signing (optional)
+
+The CI build never contains your STT key: the repository and its build artifacts are public. To have the app ready with your server on first launch, add the address and key on your own PC, before signing:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File spikes\stride-lab\configure-ipa.ps1
+```
+
+It reads `STT_URL` and `STT_API_KEY` from `bridge/.env` and writes `build-out\StrideLab-configured.ipa` next to the original. Sign and install that file instead. It holds your key: copy it only to the PC that signs it, and delete it once the app is installed. On first launch the app moves the key into the iPhone's Keychain.
+
 ## Before you start
 
-1. On the PC: `npm run pair -- --lab`. Open the page it writes and scan the code with the iPhone camera. Stride Lab opens and stores the STT address and key (in the Keychain). Delete the page afterwards: it contains the key.
+1. If you did not configure the .ipa: on the PC, `npm run pair -- --lab`. Open the page it writes and scan the code with the iPhone camera. Stride Lab opens and stores the STT address and key (in the Keychain). Delete the page afterwards: it contains the key.
 2. Open Stride Lab, go to **1. Connect the glasses**, tap **Register with the Meta AI app** and allow Stride Lab there.
 
 ## Results
