@@ -29,6 +29,7 @@ final class Audio: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     private var lastLevelAt = Date.distantPast
     private var remoteReady = false
     private(set) var peak: Float = 0
+    private var blocks = 0
     private let lock = NSLock()
 
     override init() {
@@ -40,7 +41,12 @@ final class Audio: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         }
         NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: nil, queue: .main) { [weak self] note in
             guard let self, (note.object as? AVAudioEngine) === self.engine, self.running else { return }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in _ = self?.startEngine() }
+            let where_ = UIApplication.shared.applicationState == .active ? "app in front" : "app in background"
+            self.onLog?("audio configuration changed (\(where_)): restarting the engine")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                guard let self else { return }
+                self.onLog?(self.startEngine() ? "audio engine restarted: in \(self.input)" : "audio engine did not restart")
+            }
         }
         NotificationCenter.default.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] note in
             let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt ?? 0
@@ -142,6 +148,7 @@ final class Audio: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         }
         lock.lock()
         peak = max(peak, rms)
+        blocks += 1
         lock.unlock()
 
         if let onPCM, let converter {
@@ -171,8 +178,17 @@ final class Audio: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     }
 
     func resetPeak() {
-        lock.lock(); peak = 0; lock.unlock()
+        lock.lock(); peak = 0; blocks = 0; lock.unlock()
     }
+
+    /// Microphone buffers received since resetPeak(): 0 means the microphone
+    /// delivered nothing at all, not just silence.
+    var blocksSinceReset: Int {
+        lock.lock(); defer { lock.unlock() }
+        return blocks
+    }
+
+    var engineRunning: Bool { engine.isRunning }
 
     var currentPeak: Float {
         lock.lock(); defer { lock.unlock() }

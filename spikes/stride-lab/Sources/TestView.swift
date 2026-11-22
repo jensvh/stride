@@ -61,15 +61,17 @@ struct ConnectControls: View {
 
     var body: some View {
         LabeledContent("Registration", value: glasses.registration)
-        LabeledContent("Glasses found", value: "\(glasses.devices)")
+        LabeledContent("Glasses listed", value: "\(glasses.devices)")
+        Text(glasses.deviceInfo).font(.footnote).foregroundStyle(glasses.connected ? .green : .orange)
         LabeledContent("Session", value: glasses.sessionState)
         Button("Register with the Meta AI app") { glasses.register() }
         Button("Open a session") {
             Task {
-                _ = await glasses.ensureSession()
-                results.measure(.connect, .screenOn, "registration \(glasses.registration), \(glasses.devices) device(s), session \(glasses.sessionState)")
+                let session = await glasses.ensureSession()
+                results.measure(.connect, .screenOn, "registration \(glasses.registration), \(glasses.deviceInfo), session \(session == nil ? "failed: \(glasses.status)" : glasses.sessionState)")
             }
         }
+        GlassesStatus()
     }
 }
 
@@ -93,6 +95,45 @@ struct MicControls: View {
         if audio.running && !audio.viaGlasses {
             Text("Not listening through the glasses. Check they are connected in Bluetooth settings, then Stop and Start.")
                 .font(.footnote).foregroundStyle(.orange)
+        }
+        ToolkitMic()
+    }
+}
+
+/// The second route to the glasses' microphone: audio on the toolkit's camera
+/// stream (Meta's sample app uses it because it keeps working in a pocket).
+struct ToolkitMic: View {
+    @EnvironmentObject var glasses: Glasses
+    @EnvironmentObject var results: ResultStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Second route: through the toolkit").font(.subheadline.bold())
+            Text("The glasses' microphone as audio on the toolkit's camera stream. The Meta AI app asks for microphone access the first time.")
+                .font(.footnote).foregroundStyle(.secondary)
+        }
+        LabeledContent("Audio", value: glasses.micFrames > 0 ? "\(glasses.micFrames) blocks, \(Int(glasses.micRate)) Hz" : glasses.cameraState)
+        Level(value: glasses.micLevel)
+        if glasses.cameraState == "off" {
+            Button("Start (toolkit)") { glasses.startCamera(raw: false, showFrames: false, mic: true) }
+        } else {
+            Button("Stop (toolkit)", role: .destructive) {
+                results.measure(.mic, .screenOn, "toolkit route: \(glasses.micFrames) audio blocks, \(Int(glasses.micRate)) Hz, peak \(String(format: "%.3f", glasses.micPeak))")
+                glasses.stopCamera()
+            }
+        }
+        GlassesStatus()
+    }
+}
+
+/// What the last glasses action is doing, or why it stopped.
+struct GlassesStatus: View {
+    @EnvironmentObject var glasses: Glasses
+
+    var body: some View {
+        if !glasses.status.isEmpty {
+            Text(glasses.status).font(.footnote)
+                .foregroundStyle(glasses.status.contains("fail") || glasses.status.contains("not ") || glasses.status.contains("No ") ? .orange : .secondary)
         }
     }
 }
@@ -160,6 +201,7 @@ struct CameraControls: View {
                 glasses.stopCamera()
             }
         }
+        GlassesStatus()
     }
 }
 
@@ -169,6 +211,7 @@ struct PhotoControls: View {
 
     var body: some View {
         Button("Take photo") { glasses.takePhoto() }
+        GlassesStatus()
         if let photo = glasses.photo {
             Image(uiImage: photo).resizable().scaledToFit().frame(maxHeight: 360).clipShape(RoundedRectangle(cornerRadius: 10))
             LabeledContent("Size", value: "\(Int(photo.size.width * photo.scale)) × \(Int(photo.size.height * photo.scale))")
@@ -194,6 +237,7 @@ struct DisplayControls: View {
         Button("Show a longer text") {
             glasses.showCard(title: "Claude", body: "The tests pass. I changed two files: the relay client and its test. Want me to open a pull request?")
         }
+        GlassesStatus()
         Button("Clear") {
             if !display.choices.isEmpty || display.sendMs != nil {
                 results.measure(.display, .screenOn, "card sent in \(display.sendMs ?? -1) ms, picks: \(display.choices.joined(separator: ", "))")
@@ -218,6 +262,7 @@ struct GestureControls: View {
             audio.start()
             glasses.startInputs()
         }
+        GlassesStatus()
         if !display.inputs.isEmpty {
             ForEach(Array(display.inputs.suffix(10).enumerated()), id: \.offset) { Text($0.element).font(.caption.monospaced()) }
         }

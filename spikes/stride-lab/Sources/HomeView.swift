@@ -48,6 +48,9 @@ struct HomeView: View {
                 Section("Results") {
                     ShareLink(item: results.report()) { Label("Share results", systemImage: "square.and.arrow.up") }
                     Button("Show log") { showLog = true }
+                    // The whole log file, every run, not just this one.
+                    ShareLink(item: FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                        .appendingPathComponent("stride-lab.log")) { Label("Share full log", systemImage: "doc.text") }
                     Button("Clear all results", role: .destructive) { results.reset() }
                 }
             }

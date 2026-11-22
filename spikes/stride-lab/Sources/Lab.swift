@@ -157,8 +157,10 @@ final class Lab: ObservableObject {
         audio.beep()
         await wait(5)
         let peak = audio.currentPeak
+        let blocks = audio.blocksSinceReset
         let micOK = peak > 0.01 && audio.sampleRate > 0
-        results.measure(.mic, round, "input \(audio.input), \(Int(audio.sampleRate)) Hz, peak \(String(format: "%.3f", peak)), \(whereAmI())")
+        results.measure(.mic, round, "input \(audio.input), \(Int(audio.sampleRate)) Hz, peak \(String(format: "%.3f", peak)), \(blocks) audio blocks in 5 s (about 150 expected), engine \(audio.engineRunning ? "running" : "stopped"), \(whereAmI())")
+        log("screen off: microphone peak \(String(format: "%.3f", peak)), \(blocks) blocks, engine \(audio.engineRunning ? "running" : "stopped")")
         results.set(.mic, round, micOK ? (audio.viaGlasses ? .works : .partly) : .fails)
         if Task.isCancelled { return }
 
@@ -171,8 +173,10 @@ final class Lab: ObservableObject {
             audio.beep()
             await wait(8)
             let heard = stt.finals.joined(separator: " ")
+            let streamState = stt.state
+            let partial = stt.partial
             stt.stop()
-            results.measure(.stt, round, heard.isEmpty ? "nothing heard (\(stt.state)), \(whereAmI())" : "heard “\(heard)”, server \(stt.lastLatencyMs ?? -1) ms, \(whereAmI())")
+            results.measure(.stt, round, heard.isEmpty ? "nothing heard (stream: \(streamState)\(partial.isEmpty ? "" : ", partial “\(partial)”")), \(whereAmI())" : "heard “\(heard)”, server \(stt.lastLatencyMs ?? -1) ms, \(whereAmI())")
             results.set(.stt, round, heard.isEmpty ? .fails : .works)
             await speak(heard.isEmpty ? "I heard nothing." : "I heard: \(heard)")
         } else {
@@ -187,11 +191,12 @@ final class Lab: ObservableObject {
         glasses.showCard(title: "Screen off test", body: "Did you hear me clearly? Pick Yes or No.")
         await speak("Display test. If you hear this clearly, pick Yes on the display of your glasses. Otherwise pick No.")
         var choice: String?
-        for _ in 0..<60 {
+        for _ in 0..<100 {
             if let last = glasses.display.choices.last { choice = last; break }
             await wait(0.25)
         }
         results.measure(.display, round, "display \(glasses.display.state), sent in \(glasses.display.sendMs ?? -1) ms, answer \(choice ?? "none"), \(whereAmI())")
+        if choice == nil { results.measure(.display, round, "why: \(glasses.status)") }
         results.set(.display, round, choice != nil ? .works : .fails)
         if let choice {
             results.measure(.speech, round, "you answered \(choice) on the lens")
@@ -201,37 +206,37 @@ final class Lab: ObservableObject {
         }
         if Task.isCancelled { return }
 
-        // 5. Camera
+        // 5. Camera, with the glasses' microphone on the same stream. HEVC:
+        // a raw stream pauses as soon as the app is off the screen.
         step("camera")
-        await speak("Camera test. Look around for a few seconds.")
-        glasses.startCamera(raw: true, showFrames: false)
+        await speak("Camera test. Look around, and keep talking, for eight seconds.")
+        await glasses.startCameraNow(raw: false, showFrames: false, mic: true)
+        for _ in 0..<40 where !glasses.cameraStreaming { await wait(0.25) }
         await wait(8)
-        var frames = glasses.frames
-        var codec = "raw"
+        let frames = glasses.frames
+        let micBlocks = glasses.micFrames
+        let micPeak = glasses.micPeak
+        let cameraState = glasses.cameraState
         glasses.stopCamera()
-        if frames == 0 {
-            glasses.startCamera(raw: false, showFrames: false)
-            await wait(8)
-            frames = glasses.frames
-            codec = "hvc1"
-            glasses.stopCamera()
-        }
-        results.measure(.camera, round, "\(frames) frames in 8 s (\(codec)), state \(glasses.cameraState), \(whereAmI())")
+        results.measure(.camera, round, "\(frames) frames in 8 s (hvc1), state \(cameraState), \(whereAmI())")
         results.set(.camera, round, frames > 20 ? .works : (frames > 0 ? .partly : .fails))
+        if frames == 0 { results.measure(.camera, round, "why: \(glasses.status)") }
+        results.measure(.mic, round, "toolkit route: \(micBlocks) audio blocks, peak \(String(format: "%.3f", micPeak)), \(whereAmI())")
+        if micBlocks > 0 && micPeak > 0.01 && !micOK { results.set(.mic, round, .partly) }
         if Task.isCancelled { return }
 
         // 6. Photo
         step("photo")
         await speak("Photo test. Hold still.")
         let before = glasses.photo
-        glasses.takePhoto()
+        glasses.takePhoto(raw: false)
         var gotPhoto = false
-        for _ in 0..<60 {
+        for _ in 0..<100 {
             if glasses.photo !== before, glasses.photo != nil { gotPhoto = true; break }
             await wait(0.25)
         }
         glasses.stopCamera()
-        results.measure(.photo, round, gotPhoto ? "photo after \(glasses.photoMs ?? -1) ms, \(whereAmI())" : "no photo within 15 s, \(whereAmI())")
+        results.measure(.photo, round, gotPhoto ? "photo after \(glasses.photoMs ?? -1) ms, \(whereAmI())" : "no photo within 25 s (\(glasses.status)), \(whereAmI())")
         results.set(.photo, round, gotPhoto ? .works : .fails)
         if Task.isCancelled { return }
 
